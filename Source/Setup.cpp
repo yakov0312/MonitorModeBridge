@@ -3,13 +3,15 @@
 //
 #include "Setup.h"
 
-Setup::Setup() : m_network(NetworkHandler::getInstance())
+#include "WifiRelatedPackets.h"
+
+Setup::Setup() : m_network(AdapterHandler::getInstance())
 {
-	m_network.checkErr();
+	m_network.checkErr(); //check if there were errors
 }
 
 
-int ConnectToNetwork(const NetworkInfo::BasicNetworkInfo &networkInfo)
+int ConnectToNetwork(const NetworkInfo::BasicNetworkInfo& networkInfo)
 {
 	return 0;
 }

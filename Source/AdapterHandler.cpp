@@ -1,39 +1,39 @@
-#include "NetworkHandler.h"
+#include "AdapterHandler.h"
 
 #include <cstring>
 #include <memory>
 #include <ifaddrs.h>
 #include <netpacket/packet.h>
 
-constexpr uint8_t TIMEOUT = 10000; //10 sec
+constexpr uint32_t TIMEOUT = 1000; //10 sec
 
-NetworkHandler NetworkHandler::m_instance = NetworkHandler();
+AdapterHandler AdapterHandler::m_instance = AdapterHandler();
 
-NetworkHandler::NetworkHandler() : m_device(nullptr), m_deviceHandle(nullptr), m_deviceMac{0},
-    m_deviceIp(0), m_gateWayIp(0), m_gateWayMac{0}, m_errFlag(false)
+AdapterHandler::AdapterHandler() : m_device(nullptr), m_deviceHandle(nullptr), m_deviceMac{0},
+    m_errFlag(false)
 {
     if (initDevice())
-        initNetwork();
+        initDeviceNetwork();
 }
 
-NetworkHandler::~NetworkHandler()
+AdapterHandler::~AdapterHandler()
 {
     if (m_device != nullptr)
         pcap_freealldevs(m_device);
 }
 
-NetworkHandler& NetworkHandler::getInstance()
+AdapterHandler& AdapterHandler::getInstance()
 {
     return m_instance;
 }
 
-void NetworkHandler::checkErr() const
+void AdapterHandler::checkErr() const
 {
     if (m_errFlag == true)
         throw std::runtime_error("There were errors while setting up!");
 }
 
-bool NetworkHandler::initDevice()
+bool AdapterHandler::initDevice()
 {
     char errbuf[PCAP_ERRBUF_SIZE];
     if (pcap_findalldevs(&m_device, errbuf) == -1)
@@ -57,13 +57,7 @@ bool NetworkHandler::initDevice()
     return true;
 }
 
-bool NetworkHandler::initNetwork()
-{
-    bool result = (initDeviceNetwork()) ? initGatewayNetwork() : false;
-    return result;
-}
-
-bool NetworkHandler::initDeviceNetwork()
+bool AdapterHandler::initDeviceNetwork()
 {
     ifaddrs* addrs = nullptr;
     getifaddrs(&addrs);
@@ -89,24 +83,20 @@ bool NetworkHandler::initDeviceNetwork()
         m_errFlag = true;
         return false;
     }
+    m_deviceName = m_device->name;
     return true;
 }
 
-bool NetworkHandler::initGatewayNetwork()
-{
-    return true;
-}
-
-void NetworkHandler::resolveErrors()
+void AdapterHandler::resolveErrors()
 {
     if (initDevice()) {
-        if (initNetwork()) {
+        if (initDeviceNetwork()) {
             m_errFlag = false;
         }
     }
 }
 
-u_char* NetworkHandler::getMacOffset(uint64_t* mac)
+u_char* AdapterHandler::getMacOffset(uint64_t* mac)
 {
     u_char* macOffset = nullptr;
     if constexpr (std::endian::native == std::endian::little)
@@ -120,30 +110,27 @@ u_char* NetworkHandler::getMacOffset(uint64_t* mac)
     return macOffset;
 }
 
-bool NetworkHandler::getErr() const {
+bool AdapterHandler::getErr() const
+{
     return m_errFlag;
 }
 
-pcap_if_t * NetworkHandler::getDevice() const {
+pcap_if_t * AdapterHandler::getDevice() const
+{
     return m_device;
 }
 
-pcap_t * NetworkHandler::getDeviceHandle() const {
+pcap_t * AdapterHandler::getDeviceHandle() const
+{
     return m_deviceHandle;
 }
 
-uint32_t NetworkHandler::getDeviceIp() const {
-    return m_deviceIp;
-}
-
-const uint8_t * NetworkHandler::getDeviceMac() const {
+const uint8_t * AdapterHandler::getDeviceMac() const
+{
     return m_deviceMac;
 }
 
-uint32_t NetworkHandler::getGatewayIp() const {
-    return m_gateWayIp;
-}
-
-const uint8_t * NetworkHandler::getGatewayMac() const {
-    return m_gateWayMac;
+std::string AdapterHandler::getDeviceName() const
+{
+    return m_deviceName;
 }
