@@ -3,8 +3,19 @@
 //
 #pragma once
 
+#include <functional>
+#include <vector>
+
 #include "WifiRelatedPackets.h"
 #include "libwifi.h"
+
+enum PacketStatus
+{
+	SUCCESS,
+	WRONG_PACKET_TYPE,
+	INVALID_PACKET,
+	FAILED
+};
 
 class HIDDEN ConnectionHandler
 {
@@ -13,6 +24,9 @@ public:
 	~ConnectionHandler();
 	void connect(const BasicNetworkInfo &network);
 private:
+	using PacketHandlerFunc = std::function<PacketStatus(const u_char*, uint16_t)>;
+
+
 	void getNetworkInfo(const BasicNetworkInfo &network);
 	void authenticateNetwork();
 	void associateNetwork();
@@ -22,7 +36,13 @@ private:
 
 	//helpers
 	uint8_t setChannel(uint8_t channel);
-	void SendNumberPackets(uint8_t numberOfPackets, const u_char* packet, int packetSize);
+	bool sendPackets(uint8_t numberOfPackets, const PacketHandlerFunc& packetHandler, const std::vector<uint8_t>& packet);
+	void checkStatus(uint8_t status, bool conditionResult);
+
+	static bool checkPacket(libwifi_frame* frame, const uint8_t* rawPacket, uint16_t packetSize, uint8_t subtype);
+
+	uint8_t m_channel;
+	uint16_t m_aid;
 
 	AdapterHandler& m_adapterHandler;
 	pcap_t* m_deviceHandle;
