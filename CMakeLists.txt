@@ -1,5 +1,6 @@
 cmake_minimum_required(VERSION 3.31)
 project(MonitorModeBridge)
+set(CMAKE_BUILD_TYPE Debug)
 
 set(CMAKE_CXX_STANDARD 20)
 
@@ -17,6 +18,13 @@ set_target_properties(wifi PROPERTIES
         INTERFACE_INCLUDE_DIRECTORIES ${CMAKE_SOURCE_DIR}/Libs
 )
 
+add_library(crypto STATIC IMPORTED)
+set_target_properties(crypto PROPERTIES
+        IMPORTED_LOCATION ${CMAKE_SOURCE_DIR}/Libs/libcrypto.a
+        INTERFACE_INCLUDE_DIRECTORIES ${CMAKE_SOURCE_DIR}/Libs
+)
+
+
 # Link libwifi
 target_link_libraries(MonitorModeBridge PRIVATE wifi)
 
@@ -30,3 +38,6 @@ if(PCAP_INCLUDE_DIR AND PCAP_LIBRARY)
 else()
     message(WARNING "libpcap not found — MonitorModeBridge will build without it.")
 endif()
+
+add_executable(Loader Loader/main.cpp)
+target_link_libraries(Loader PRIVATE MonitorModeBridge)

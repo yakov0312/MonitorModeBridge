@@ -4,7 +4,7 @@
 #include "attributeControl.h"
 #include "pcap.h"
 
-constexpr int MAC_LEN_BYTES = 6;
+constexpr uint8_t MAC_SIZE_BYTES = 6;
 
 class HIDDEN AdapterHandler
 {
@@ -39,7 +39,7 @@ private:
 	//device
 	pcap_if_t* m_device;
 	pcap_t* m_deviceHandle;
-	uint8_t m_deviceMac[MAC_LEN_BYTES];
+	uint8_t m_deviceMac[MAC_SIZE_BYTES];
 	std::string m_deviceName;
 
 	//flags

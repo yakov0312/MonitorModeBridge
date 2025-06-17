@@ -6,37 +6,32 @@
 #include <algorithm>
 #include <cstring>
 #include <stdexcept>
-#include <vector>
 
-#include <sys/ioctl.h>
-#include <net/if.h>
-#include <linux/wireless.h>
-#include <unistd.h>
-
-constexpr uint8_t PROBE_REQUEST_COUNT = 3;
-constexpr uint8_t MAX_AUTH_ATTEMPTS = 3;
-constexpr uint8_t MAX_ASSOC_ATTEMPTS = 3;
-
-constexpr uint8_t SUPPORTED_RATES_BITMASK = 0x8F;
-
-constexpr uint8_t CHANNELS = 15; //there are 14 channels(channel 14 is only in japan)
-
-constexpr uint8_t MAC_HEADER_SIZE = 24;
-
-constexpr uint8_t TRANSACTION_SEQUENCE_REQ = 1;
-constexpr uint8_t TRANSACTION_SEQUENCE_RESP = 2;
-constexpr uint8_t AUTH_SUCCESS = 0;
-constexpr uint8_t ASSOC_SUCCESS = 0;
+#include "Helper.h"
+#include <openssl/evp.h>
+#include <sys/random.h>
 
 #define PACKET_HANDLER(X) (const u_char* rawResponse, uint16_t length) -> PacketStatus { X }
 
 ConnectionHandler::ConnectionHandler() : m_adapterHandler(AdapterHandler::getInstance()),
-	m_networkInfo(), m_deviceHandle(m_adapterHandler.getDeviceHandle())
+	m_deviceHandle(m_adapterHandler.getDeviceHandle()), m_channel(0), m_aid(0), m_akmSuite(0),
+	m_bssid{0}, m_groupSuite(0), m_pairSuite(0), m_password(""), m_rsnTag(0), m_securityType(0),
+	m_ssid("")
 {
 }
 
 ConnectionHandler::~ConnectionHandler()
 {
+}
+
+void ConnectionHandler::connect(const BasicNetworkInfo &network)
+{
+	this->getNetworkInfo(network);
+	this->authenticateNetwork();
+	this->associateNetwork();
+	if (m_securityType != NONE_SECURITY)
+		this->performHandshake();
+	this->setIp();
 }
 
 void ConnectionHandler::getNetworkInfo(const BasicNetworkInfo& network)
@@ -49,25 +44,29 @@ void ConnectionHandler::getNetworkInfo(const BasicNetworkInfo& network)
 
 	auto packetHandler = [this, &network]PACKET_HANDLER({
 		libwifi_frame response = {0};
-		if (!ConnectionHandler::checkPacket(&response, rawResponse, length, SUBTYPE_PROBE_RESP))
+		if (!Helper::checkPacket(&response, rawResponse, length, SUBTYPE_PROBE_RESP))
 			return WRONG_PACKET_TYPE;
 
-		libwifi_free_wifi_frame(&response);
-
-		if (this->m_networkInfo.channel != 0) //its not the first packet(channel can never be 0)
-			libwifi_free_bss(&this->m_networkInfo);
-
-		if (libwifi_parse_probe_resp(&this->m_networkInfo, &response) != 0)
+		libwifi_bss bss;
+		if (libwifi_parse_probe_resp(&bss, &response) != 0)
 			throw std::runtime_error("cannot parse the frame");
 
-		if (memcmp(this->m_networkInfo.ssid, network.networkName.data(), network.networkName.size()) == 0)
-			return SUCCESS;
-		return INVALID_PACKET; //invalid name
+		PacketStatus packetStatus = INVALID_PACKET;
+		if (memcmp(bss.ssid, network.networkName.data(), network.networkName.size()) == 0)
+		{
+			m_ssid = std::string(bss.ssid, network.networkName.size());
+			memcpy(m_bssid, bss.bssid, MAC_SIZE_BYTES);
+			this->setSecurity(&bss);
+			packetStatus = SUCCESS;
+		}
+		libwifi_free_bss(&bss);
+		libwifi_free_wifi_frame(&response);
+		return packetStatus;
 	});
 
 	for (m_channel = 1; m_channel < CHANNELS; m_channel++)
 	{
-		this->setChannel(m_channel); //set the channel
+		Helper::setChannel(m_channel); //set the channel
 		libwifi_probe_req probeRequest = {0};
 		libwifi_create_probe_req(&probeRequest, BROADCAST_MAC_ADDRESS, //create the packet
 			m_adapterHandler.getDeviceMac(), BROADCAST_MAC_ADDRESS, network.networkName.data(), m_channel);
@@ -76,7 +75,7 @@ void ConnectionHandler::getNetworkInfo(const BasicNetworkInfo& network)
 		std::vector<uint8_t> packet(probeLength);
 		libwifi_dump_probe_req(&probeRequest, packet.data(), packet.size());
 
-		if (this->sendPackets(PROBE_REQUEST_COUNT, packetHandler, packet))
+		if (Helper::sendPackets(PROBE_REQUEST_COUNT, packetHandler, packet))
 			return;
 	}
 	throw std::invalid_argument("cannot find specified network");
@@ -85,8 +84,8 @@ void ConnectionHandler::getNetworkInfo(const BasicNetworkInfo& network)
 void ConnectionHandler::authenticateNetwork()
 {
 	libwifi_auth auth = {0};
-	libwifi_create_auth(&auth, this->m_networkInfo.bssid, this->m_adapterHandler.getDeviceMac(),
-		this->m_networkInfo.bssid, AUTH_OPEN, TRANSACTION_SEQUENCE_REQ, AUTH_SUCCESS);
+	libwifi_create_auth(&auth, this->m_bssid, this->m_adapterHandler.getDeviceMac(),
+		this->m_bssid, AUTH_OPEN, TRANSACTION_SEQUENCE_REQ, AUTH_SUCCESS);
 
 	uint16_t length = libwifi_get_auth_length(&auth);
 	std::vector<uint8_t> packet(length);
@@ -94,7 +93,7 @@ void ConnectionHandler::authenticateNetwork()
 
 	auto packetHandler = []PACKET_HANDLER({
 			libwifi_frame frameResp = {0};
-			if (!ConnectionHandler::checkPacket(&frameResp, rawResponse, length, SUBTYPE_AUTH))
+			if (!Helper::checkPacket(&frameResp, rawResponse, length, SUBTYPE_AUTH))
 			{
 				libwifi_free_wifi_frame(&frameResp);
 				return WRONG_PACKET_TYPE;
@@ -112,26 +111,28 @@ void ConnectionHandler::authenticateNetwork()
 			return INVALID_PACKET;
 	});
 
-	if (!this->sendPackets(MAX_AUTH_ATTEMPTS, packetHandler, packet))
+	if (!Helper::sendPackets(MAX_AUTH_ATTEMPTS, packetHandler, packet))
 		throw std::runtime_error("cannot authenticate to the network");
 }
 
 void ConnectionHandler::associateNetwork()
 {
-	setChannel(m_networkInfo.channel); //ensure the channel is right
+	Helper::setChannel(m_channel); //ensure the channel is right
 
 	libwifi_assoc_req association = {0};
-	libwifi_create_assoc_req(&association, this->m_networkInfo.bssid, this->m_adapterHandler.getDeviceMac(),
-		m_networkInfo.bssid, m_networkInfo.ssid, m_networkInfo.channel);
+	libwifi_create_assoc_req(&association, this->m_bssid, this->m_adapterHandler.getDeviceMac(),
+		this->m_bssid, this->m_ssid.data(), m_channel);
+	if (m_securityType == NONE_SECURITY) //add only if there is a security
+		libwifi_quick_add_tag(&association.tags, TAG_RSN, m_rsnTag, sizeof(m_rsnTag));
 
 	uint16_t length = libwifi_get_assoc_req_length(&association);
 	std::vector<uint8_t> packet(length);
 	libwifi_dump_assoc_req(&association, packet.data(), packet.size());
-
+	libwifi_free_assoc_req(&association);
 
 	auto packetHandler = [this]PACKET_HANDLER({
 		libwifi_frame response = {0};
-		if (!ConnectionHandler::checkPacket(&response, rawResponse, length, SUBTYPE_ASSOC_RESP))
+		if (!Helper::checkPacket(&response, rawResponse, length, SUBTYPE_ASSOC_RESP))
 		{
 			libwifi_free_wifi_frame(&response); //free the frame
 			return WRONG_PACKET_TYPE;
@@ -154,85 +155,172 @@ void ConnectionHandler::associateNetwork()
 		libwifi_free_wifi_frame(&response);
 		return status;
 	});
-
-	this->sendPackets(MAX_ASSOC_ATTEMPTS,packetHandler, packet);
+	Helper::sendPackets(MAX_ASSOC_ATTEMPTS,packetHandler, packet);
 }
 
-void ConnectionHandler::connect(const BasicNetworkInfo &network)
+void ConnectionHandler::performHandshake()
 {
-	this->getNetworkInfo(network);
-	this->authenticateNetwork();
-	this->associateNetwork();
-	this->performeHandshake();
-	this->setIp();
-}
-
-bool ConnectionHandler::sendPackets(uint8_t numberOfPackets, const PacketHandlerFunc& packetHandler, const std::vector<uint8_t>& packet)
-{
-
-	uint8_t status = 0;
-	PacketStatus packetHandlerStatus = PacketStatus::FAILED;
-	pcap_pkthdr* header = {0};
-	const u_char* rawResponse = nullptr;
-	bool result = false;
-	for (int i=0; i < numberOfPackets; i++)
-	{
-		//if the last packet was a random packet then dont send again but wait for the prev once
-		if (packetHandlerStatus != PacketStatus::WRONG_PACKET_TYPE && pcap_sendpacket(m_deviceHandle, packet.data(), packet.size()) != 0)
-		{
-			throw std::runtime_error("Cannot reach the specified network");
-		}
-
-		status = pcap_next_ex(m_deviceHandle, &header, &rawResponse);
-		this->checkStatus(status, i == MAX_AUTH_ATTEMPTS -1);
-		if (status == 0)
-		{
-			packetHandlerStatus = PacketStatus::FAILED; //restore the status
-			continue;
-		}
-
-		packetHandlerStatus = packetHandler(rawResponse, header->caplen);
-		if (packetHandlerStatus == PacketStatus::SUCCESS)
-			return true;
-		if (packetHandlerStatus == PacketStatus::FAILED)
-			throw std::runtime_error("AP returned an error");
-		if (packetHandlerStatus == PacketStatus::WRONG_PACKET_TYPE) //the packet was a random packet
-			i--;
-	}
-	return false;
-}
-
-uint8_t ConnectionHandler::setChannel(uint8_t channel)
-{
-	int sock = socket(AF_INET, SOCK_DGRAM, 0);
-	if (sock < 0) return -1;
-
-	iwreq wrq;
-	memset(&wrq, 0, sizeof(wrq));
-	strncpy(wrq.ifr_name, this->m_adapterHandler.getDeviceName().data(), IFNAMSIZ);
-
-	wrq.u.freq.m = 2412 + 5 * (channel - 1);
-	wrq.u.freq.e = 6;
-
-	int result = ioctl(sock, SIOCSIWFREQ, &wrq);
-	close(sock);
-	return result;
-}
-
-bool ConnectionHandler::checkPacket(libwifi_frame *frame, const uint8_t *rawPacket, uint16_t packetSize,
-	uint8_t subtype)
-{
-	if (libwifi_get_wifi_frame(frame, rawPacket, packetSize, true) != 0)
-		throw std::runtime_error("cannot parse the frame");
-	else if (frame->frame_control.type != TYPE_MANAGEMENT && frame->frame_control.subtype != subtype)
-		return false;
-	return true;
-}
-
-void ConnectionHandler::checkStatus(uint8_t status, bool conditionResult)
-{
-	if (status == PCAP_ERROR)
+	bpf_program filter;
+	if (pcap_compile(this->m_deviceHandle, &filter, HANDSHAKE_FILTER, 1, PCAP_NETMASK_UNKNOWN) == -1)
 		throw std::runtime_error(pcap_geterr(m_deviceHandle));
-	else if (status != 1 && conditionResult)
-		throw std::runtime_error("Cannot reach the specified network");
+	if (pcap_setfilter(m_deviceHandle, &filter) == -1)
+		throw std::runtime_error(pcap_geterr(m_deviceHandle));
+
+	if (m_securityType == WPA2 || m_akmSuite == LIBWIFI_AKM_PSK_SHA384)
+		performHandshakeNonSAE(); //connection using normal psk calculations
+	else
+		performHandshakeSAE(); //connection using SAE (wpa3)
+}
+
+void ConnectionHandler::performHandshakeNonSAE()
+{
+	libwifi_frame frame = {0};
+	getHandshakePacketNonSAE(&frame);
+
+	libwifi_wpa_auth_data wpaData;
+	if (libwifi_get_wpa_data(&frame, &wpaData) != 0)
+		throw std::runtime_error("Failed to parse WPA data");
+	if (libwifi_check_wpa_message(&frame) != HANDSHAKE_M1)
+		throw std::runtime_error("Invalid wpa data");
+
+	uint8_t pmk[MAX_PMK_SIZE] = {0};
+	Helper::getPmk(m_password, m_akmSuite, m_ssid, pmk);
+	//calculate data for ptk
+	uint8_t data[PTK_DATA_SIZE] = {0};
+
+	uint8_t sNonce[NONCE_SIZE];
+	if (getrandom(sNonce, sizeof(sNonce), 0) != sizeof(sNonce))
+		throw std::invalid_argument("Failed to generate SNonce");
+
+	Helper::getPtkData(data, wpaData.key_info.nonce, sNonce, m_bssid);
+	uint8_t ptk[PTK_SIZE] = {0};
+	Helper::getPtk(ptk, pmk, data, m_akmSuite);
+
+	//construct the m2
+	wpaAuthData wpaDataResp {
+		.version = VERSION,
+		.type = EAPOL_KEY_INFO,
+		.length = htons(sizeof(wpaKeyInfo)),
+		.descriptorType = WPA2_Key_Descriptor,
+		.keyInfo{
+			.information = INFORMATION_FLAG_M2,
+			.keyLength = 0,
+			.replayCounter = wpaData.key_info.replay_counter,
+			.iv = {0},
+			.rsc = 0,
+			.id = 0,
+			.mic = {0}
+		}
+	};
+	switch(m_akmSuite) {
+		case AKM_SUITE_PSK: wpaDataResp.keyInfo.information += AKM_SUITE_PSK_VERSION; break;
+		case AKM_SUITE_PSK_SHA256: wpaDataResp.keyInfo.information += AKM_SUITE_PSK_SHA256_VERSION; break;
+		case AKM_PSK_SHA384: wpaDataResp.keyInfo.information += AKM_PSK_SHAE384_VERSION; break;
+		default: throw std::runtime_error("Invalid akm suite");}
+	wpaDataResp.keyInfo.information = htons(wpaDataResp.keyInfo.information);
+	Helper::setMic(wpaDataResp, ptk, m_akmSuite);
+	if (pcap_sendpacket(m_deviceHandle, reinterpret_cast<const u_char*>(&wpaDataResp), sizeof(wpaDataResp)) == PCAP_ERROR)
+		throw std::runtime_error("Failed to send m2");
+	memset(&frame, 0, sizeof(frame));
+	getHandshakePacketNonSAE(&frame);
+
+	memset(&wpaData, 0, sizeof(wpaData));
+	if (libwifi_get_wpa_data(&frame, &wpaData) != 0)
+		throw std::runtime_error("Failed to parse WPA data");
+	if (libwifi_check_wpa_message(&frame) != HANDSHAKE_M3)
+		throw std::runtime_error("Invalid wpa data");
+
+	Helper::decryptGtk(ptk, m_akmSuite, wpaData.key_info.key_data,
+		wpaData.key_info.key_data_length, m_gtkKey);
+
+	wpaDataResp.keyInfo.information = htons(INFORMATION_FLAG_M4);
+	wpaDataResp.keyInfo.replayCounter = wpaData.key_info.replay_counter;
+	Helper::setMic(wpaDataResp, ptk, m_akmSuite);
+	if (pcap_sendpacket(m_deviceHandle, reinterpret_cast<const u_char*>(&wpaDataResp), sizeof(wpaDataResp)) == PCAP_ERROR)
+		throw std::runtime_error("Failed to send m4");
+	//handshake finished(no SAE)
+}
+
+void ConnectionHandler::performHandshakeSAE()
+{
+	return;
+}
+
+void ConnectionHandler::setIp()
+{
+	return;
+}
+
+void ConnectionHandler::getHandshakePacketNonSAE(libwifi_frame* frame)
+{
+	pcap_pkthdr* header;
+	const u_char* packet;
+	bool found = false;
+	while (!found)
+	{
+		pcap_next_ex(m_deviceHandle, &header, &packet);
+		if (libwifi_get_wifi_frame(frame, packet, header->caplen, IS_RADIOTAP) != LIBWIFI_SUCCESS)
+			throw std::runtime_error("Failed to parse frame");
+		if (libwifi_check_wpa_handshake(frame) == LIBWIFI_SUCCESS)
+			found = true;
+	}
+}
+
+void ConnectionHandler::setSecurity(libwifi_bss* bss)
+{
+	if (bss->encryption_info == NONE_SECURITY)
+	{
+		m_securityType = NONE_SECURITY;
+		m_rsnTag = nullptr;
+		return;
+	}
+	if (bss->encryption_info & WPA || bss->encryption_info & WEP)
+		throw std::runtime_error("Encryption protocol is too old");
+
+	if (bss->encryption_info & WPA3)
+	{
+		m_securityType = WPA3;
+		//pairwise suite selection
+		if (bss->encryption_info & LIBWIFI_PAIRWISE_CIPHER_SUITE_GCMP256)
+			m_pairSuite = CIPHER_SUITE_GCMP256;
+		else if (bss->encryption_info & LIBWIFI_PAIRWISE_CIPHER_SUITE_CCMP256)
+			m_pairSuite = CIPHER_SUITE_CCMP256;
+		else if (bss->encryption_info & LIBWIFI_PAIRWISE_CIPHER_SUITE_GCMP128)
+			m_pairSuite = CIPHER_SUITE_GCMP128;
+		else if (bss->encryption_info & LIBWIFI_PAIRWISE_CIPHER_SUITE_CCMP128)
+			m_pairSuite = CIPHER_SUITE_CCMP128;
+		else
+			throw std::runtime_error("Chosen suite is not supported. connection will be dropped");
+
+		//akm suite selection
+		if (bss->encryption_info & LIBWIFI_AKM_PSK_SHA384)
+			m_akmSuite = AKM_PSK_SHA384;
+		else if (bss->encryption_info & LIBWIFI_AKM_SUITE_SAE)
+			m_akmSuite = AKM_SUITE_SAE;
+		else if (bss->encryption_info & LIBWIFI_AKM_SUITE_OWE)
+			m_akmSuite = AKM_SUITE_OWE;
+		else
+			throw std::runtime_error("Chosen suite is not supported. connection will be dropped");
+
+		m_rsnTag = RSN_WPA3;
+		m_rsnTag[PAIR_SUITE_INDEX] = m_pairSuite;
+
+	}
+	else if (bss->encryption_info & WPA2)
+	{
+		m_securityType = WPA2;
+		//akm suite selection
+		if (bss->encryption_info & LIBWIFI_AKM_SUITE_PSK_SHA256)
+			m_akmSuite = AKM_SUITE_PSK_SHA256;
+		else if (bss->encryption_info & LIBWIFI_AKM_SUITE_PSK)
+			m_akmSuite = AKM_SUITE_PSK;
+		else
+			throw std::runtime_error("Given akm suites are not supported yet");
+		m_rsnTag = RSN_WPA2;
+	}
+	else
+		throw std::runtime_error("Chosen security is unsecure. connection will be dropped");
+
+	m_rsnTag[GROUP_SUITE_INDEX] = bss->rsn_info.group_cipher_suite.suite_type;
+	m_rsnTag[AKM_TYPE_INDEX] = m_akmSuite;
 }
