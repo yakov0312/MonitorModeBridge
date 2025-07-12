@@ -4,7 +4,7 @@
 #pragma once
 #include "ConnectionHandler.h"
 
-class HIDDEN Manager
+class Manager
 {
 public:
     Manager();

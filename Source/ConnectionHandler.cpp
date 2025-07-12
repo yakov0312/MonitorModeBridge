@@ -5,11 +5,17 @@
 
 #include <algorithm>
 #include <cstring>
+#include <iostream>
 #include <stdexcept>
 
 #include "Helper.h"
 #include <openssl/evp.h>
 #include <sys/random.h>
+
+extern "C" {
+#include "libwifi.h"
+}
+#include <iomanip> //for debug
 
 #define PACKET_HANDLER(X) (const u_char* rawResponse, uint16_t length) -> PacketStatus { X }
 
@@ -42,7 +48,8 @@ void ConnectionHandler::getNetworkInfo(const BasicNetworkInfo& network)
 	else if (network.networkName.empty())
 		throw std::invalid_argument("Network name is empty");
 
-	auto packetHandler = [this, &network]PACKET_HANDLER({
+	auto packetHandler = [this, &network](const u_char* rawResponse, uint16_t length) -> PacketStatus{
+
 		libwifi_frame response = {0};
 		if (!Helper::checkPacket(&response, rawResponse, length, SUBTYPE_PROBE_RESP))
 			return WRONG_PACKET_TYPE;
@@ -62,7 +69,7 @@ void ConnectionHandler::getNetworkInfo(const BasicNetworkInfo& network)
 		libwifi_free_bss(&bss);
 		libwifi_free_wifi_frame(&response);
 		return packetStatus;
-	});
+	};
 
 	for (m_channel = 1; m_channel < CHANNELS; m_channel++)
 	{
@@ -91,7 +98,9 @@ void ConnectionHandler::authenticateNetwork()
 	std::vector<uint8_t> packet(length);
 	libwifi_dump_auth(&auth, packet.data(), packet.size());
 
-	auto packetHandler = []PACKET_HANDLER({
+	auto packetHandler = [](const u_char* rawResponse, uint16_t length) -> PacketStatus{
+			Helper::printPacketDebug(rawResponse, length);
+
 			libwifi_frame frameResp = {0};
 			if (!Helper::checkPacket(&frameResp, rawResponse, length, SUBTYPE_AUTH))
 			{
@@ -109,7 +118,7 @@ void ConnectionHandler::authenticateNetwork()
 			if (auth->transaction_sequence == TRANSACTION_SEQUENCE_RESP && auth->status_code != AUTH_SUCCESS)
 				return FAILED;
 			return INVALID_PACKET;
-	});
+	};
 
 	if (!Helper::sendPackets(MAX_AUTH_ATTEMPTS, packetHandler, packet))
 		throw std::runtime_error("cannot authenticate to the network");

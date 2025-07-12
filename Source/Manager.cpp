@@ -1,8 +1,11 @@
 //
 // Created by yakov on 6/12/25.
 //
-#include "Manager.h"
+extern "C" {
+#include "libwifi.h"
+}
 
+#include "Manager.h"
 #include "WifiDefenitions.h"
 
 Manager manager;

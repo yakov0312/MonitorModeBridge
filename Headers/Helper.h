@@ -8,9 +8,12 @@
 
 #include "AdapterHandler.h"
 #include "WifiDefenitions.h"
-#include "libwifi/core/frame/frame.h"
 
-HIDDEN enum PacketStatus
+extern "C" {
+#include "libwifi/core/frame/frame.h"
+}
+
+enum HIDDEN PacketStatus
 {
 	SUCCESS,
 	WRONG_PACKET_TYPE,
@@ -18,12 +21,11 @@ HIDDEN enum PacketStatus
 	FAILED
 };
 
-HIDDEN using PacketHandlerFunc = std::function<PacketStatus(const unsigned char*, uint16_t)>;
-
-
 class HIDDEN Helper
 {
 public:
+	using PacketHandlerFunc = std::function<PacketStatus(const unsigned char*, uint16_t)>;
+
 	//adapter related
 	static uint8_t setChannel(uint8_t channel);
 
@@ -39,6 +41,8 @@ public:
 	static void setMic(wpaAuthData& m2WpaData, const uint8_t* ptk, int akmSuite);
 	static void decryptGtk(const uint8_t* ptk, uint8_t suite, const uint8_t* encryptedGtk,
 		size_t encryptedLen, uint8_t* decryptedGtk);
+
+	static void printPacketDebug(const u_char* packet, uint32_t length);
 
 private:
 	static int getKekLength(uint8_t suite);

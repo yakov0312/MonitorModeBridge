@@ -4,6 +4,8 @@
 #include "Helper.h"
 
 #include <cstring>
+#include <iomanip>
+#include <iostream>
 #include <stdexcept>
 #include <unistd.h>
 #include <vector>
@@ -14,7 +16,9 @@
 #include <linux/wireless.h>
 
 #include "WifiDefenitions.h"
+extern "C" {
 #include "libwifi/core/misc/security.h"
+}
 #include "openssl/evp.h"
 #include "openssl/hmac.h"
 #include <openssl/aes.h>
@@ -84,11 +88,11 @@ void Helper::checkStatus(uint8_t status, bool conditionResult)
 
 bool Helper::checkPacket(libwifi_frame *frame, const uint8_t *rawPacket, uint16_t packetSize, uint8_t subtype)
 {
-	if (libwifi_get_wifi_frame(frame, rawPacket, packetSize, true) != 0)
+	if (libwifi_get_wifi_frame(frame, rawPacket, packetSize, IS_RADIOTAP) != 0)
 		throw std::runtime_error("cannot parse the frame");
-	else if (frame->frame_control.type != TYPE_MANAGEMENT && frame->frame_control.subtype != subtype)
-		return false;
-	return true;
+	else if (frame->frame_control.type == TYPE_MANAGEMENT && frame->frame_control.subtype == subtype)
+		return true;
+	return false;
 }
 
 void Helper::getPmk(const std::string& password, uint8_t suite, const std::string& ssid, uint8_t* pmk)
@@ -112,7 +116,6 @@ void Helper::getPtkData(uint8_t* data, const uint8_t* nonce1, const uint8_t* non
 		throw std::invalid_argument("invalid pointers");
 	//calculate data for ptk
 	const uint8_t* mac2 = m_adapterHandler.getDeviceMac();
-	const uint8_t* nonce2 = sNonce;
 	if (memcmp(mac1, mac2, MAC_SIZE_BYTES) > 0)
 		std::swap(mac1, mac2);
 
@@ -202,28 +205,48 @@ void Helper::setMic(wpaAuthData &m2WpaData, const uint8_t *ptk, int akmSuite)
 	memcpy(m2WpaData.keyInfo.mic, micOutput, sizeof(m2WpaData.keyInfo.mic));
 }
 
+#include <openssl/evp.h>
+
 void Helper::decryptGtk(const uint8_t *ptk, uint8_t suite, const uint8_t *encryptedGtk, size_t encryptedLen,
-	uint8_t *decryptedGtk)
+						uint8_t *decryptedGtk)
 {
 	int kekLen = getKekLength(suite);
-	const uint8_t* kek = ptk + KCK_SIZE; // skip KCK, use KEK
-	int aesBits = kekLen * 8;
+	const uint8_t* kek = ptk + KCK_SIZE;
 
-	AES_KEY aesKey;
-	if (AES_set_decrypt_key(kek, aesBits, &aesKey) != 0)
-		throw std::runtime_error("Failed to initialize AES KEK");
+	const EVP_CIPHER* cipher = (kekLen == 16) ? EVP_aes_128_wrap() : EVP_aes_256_wrap();
 
-	int resultLen = AES_unwrap_key(&aesKey, nullptr, decryptedGtk, encryptedGtk, encryptedLen);
-	if (resultLen <= 0)
-		throw std::runtime_error("AES unwrap failed: invalid GTK or KEK");
+	EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+	if (!ctx)
+		throw std::runtime_error("EVP_CIPHER_CTX_new failed");
+
+	if (!EVP_DecryptInit_ex(ctx, cipher, nullptr, kek, nullptr))
+		throw std::runtime_error("EVP_DecryptInit_ex failed");
+
+	int outLen = 0;
+	if (!EVP_DecryptUpdate(ctx, decryptedGtk, &outLen, encryptedGtk, encryptedLen))
+		throw std::runtime_error("EVP_DecryptUpdate failed");
+
+	int finalLen = 0;
+	if (!EVP_DecryptFinal_ex(ctx, decryptedGtk + outLen, &finalLen))
+		throw std::runtime_error("EVP_DecryptFinal_ex failed");
+
+	EVP_CIPHER_CTX_free(ctx);
 }
+
 
 int Helper::getKekLength(uint8_t suite)
 {
 	switch (suite) {
-		case AKM_SUITE_PSK: return 16;
+		case AKM_SUITE_PSK:
 		case AKM_SUITE_PSK_SHA256: return 16;
 		case AKM_PSK_SHA384: return 32;
 		default: throw std::runtime_error("Unknown AKM suite for KEK length");
 	}
+}
+
+void Helper::printPacketDebug(const u_char *packet, uint32_t length)
+{
+	std::cout << std::hex << std::setfill('0');
+	for (int i =0; i < length; i++)
+		std::cout << std::setw(2) << static_cast<int>(packet[i]) << ' ';
 }

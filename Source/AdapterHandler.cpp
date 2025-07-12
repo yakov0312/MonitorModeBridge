@@ -4,6 +4,7 @@
 #include <memory>
 #include <ifaddrs.h>
 #include <netpacket/packet.h>
+#include "WifiDefenitions.h"
 
 constexpr uint32_t TIMEOUT = 1000; //10 sec
 
@@ -54,6 +55,13 @@ bool AdapterHandler::initDevice()
         m_errFlag = true;
         return false;
     }
+    int linkType = pcap_datalink(m_deviceHandle);
+    if (linkType == DLT_IEEE802_11_RADIO)
+        IS_RADIOTAP = true;
+    else if (linkType == DLT_IEEE802_11)
+        IS_RADIOTAP = false;
+    else
+        throw std::runtime_error("Link type is unsupported or device is not in monitor mode");
     return true;
 }
 

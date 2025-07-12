@@ -6,7 +6,7 @@
 
 constexpr uint8_t MAC_SIZE_BYTES = 6;
 
-class HIDDEN AdapterHandler
+class AdapterHandler
 {
 public:
 	~AdapterHandler();

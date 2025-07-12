@@ -4,9 +4,11 @@
 #pragma once
 
 #include "WifiDefenitions.h"
-#include "libwifi.h"
 
-class HIDDEN ConnectionHandler
+struct libwifi_bss;
+struct libwifi_frame;
+
+class ConnectionHandler
 {
 public:
 	ConnectionHandler();
