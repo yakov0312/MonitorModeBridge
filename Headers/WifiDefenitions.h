@@ -1,4 +1,6 @@
 #pragma once
+#include <type_traits>
+
 #include "AdapterHandler.h"
 #include "string"
 
@@ -19,10 +21,11 @@ constexpr uint8_t CHANNELS = 15; //there are 14 channels(channel 14 is only in j
 constexpr uint8_t SUPPORTED_RATES_BITMASK = 0x8F;
 
 //verification related
-constexpr uint8_t TRANSACTION_SEQUENCE_REQ = 1;
-constexpr uint8_t TRANSACTION_SEQUENCE_RESP = 2;
+constexpr uint16_t TRANSACTION_SEQUENCE_REQ = 1;
+constexpr uint16_t TRANSACTION_SEQUENCE_RESP = 2;
 constexpr uint8_t AUTH_SUCCESS = 0;
 constexpr uint8_t ASSOC_SUCCESS = 0;
+constexpr uint8_t BSSID_TAG = 0x0e;
 
 //libwifi related
 extern bool IS_RADIOTAP;

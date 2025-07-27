@@ -18,6 +18,8 @@ public:
 
 	//helper
 	static u_char* getMacOffset(uint64_t* mac);
+	static void setDeviceToManaged();
+	static void setDeviceToManaged(int sig);
 
 	//getters
 	[[nodiscard]] bool getErr() const;

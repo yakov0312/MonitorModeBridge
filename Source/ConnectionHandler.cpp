@@ -48,48 +48,72 @@ void ConnectionHandler::getNetworkInfo(const BasicNetworkInfo& network)
 	else if (network.networkName.empty())
 		throw std::invalid_argument("Network name is empty");
 
-	auto packetHandler = [this, &network](const u_char* rawResponse, uint16_t length) -> PacketStatus{
-
-		libwifi_frame response = {0};
-		if (!Helper::checkPacket(&response, rawResponse, length, SUBTYPE_PROBE_RESP))
-			return WRONG_PACKET_TYPE;
-
-		libwifi_bss bss;
-		if (libwifi_parse_probe_resp(&bss, &response) != 0)
-			throw std::runtime_error("cannot parse the frame");
-
-		PacketStatus packetStatus = INVALID_PACKET;
-		if (memcmp(bss.ssid, network.networkName.data(), network.networkName.size()) == 0)
-		{
-			m_ssid = std::string(bss.ssid, network.networkName.size());
-			memcpy(m_bssid, bss.bssid, MAC_SIZE_BYTES);
-			this->setSecurity(&bss);
-			packetStatus = SUCCESS;
-		}
-		libwifi_free_bss(&bss);
-		libwifi_free_wifi_frame(&response);
-		return packetStatus;
-	};
-
+	uint8_t status = 0;
+	pcap_pkthdr* header = {0};
+	const u_char* rawResponse = nullptr;
 	for (m_channel = 1; m_channel < CHANNELS; m_channel++)
 	{
 		Helper::setChannel(m_channel); //set the channel
-		libwifi_probe_req probeRequest = {0};
-		libwifi_create_probe_req(&probeRequest, BROADCAST_MAC_ADDRESS, //create the packet
-			m_adapterHandler.getDeviceMac(), BROADCAST_MAC_ADDRESS, network.networkName.data(), m_channel);
 
-		uint16_t probeLength = libwifi_get_probe_req_length(&probeRequest);
-		std::vector<uint8_t> packet(probeLength);
-		libwifi_dump_probe_req(&probeRequest, packet.data(), packet.size());
+		for (int i =0; i < PROBE_REQUEST_COUNT;i++)
+		{
+			status = pcap_next_ex(m_adapterHandler.getDeviceHandle(), &header, &rawResponse);
+			Helper::checkStatus(status, i == PROBE_REQUEST_COUNT -1);
+			if (status == 0)
+				continue;
 
-		if (Helper::sendPackets(PROBE_REQUEST_COUNT, packetHandler, packet))
-			return;
+			libwifi_frame response = {0};
+			if (!Helper::checkPacket(&response, rawResponse, header->caplen, SUBTYPE_BEACON))
+			{
+				i--;
+				continue;
+			}
+
+			libwifi_bss bss;
+			if (libwifi_parse_beacon(&bss, &response) != 0)
+				throw std::runtime_error("cannot parse the frame");
+			bool found = false;
+			if (memcmp(bss.ssid, network.networkName.data(), network.networkName.size()) == 0)
+			{
+				//Helper::printPacketDebug(rawResponse, header->caplen);
+				m_ssid = std::string(bss.ssid, network.networkName.size());
+				this->setSecurity(&bss);
+				m_channel = bss.channel;
+				if (bss.tags.length != 0 && false)
+				{
+					struct libwifi_tag_iterator it = {0};
+					if (libwifi_tag_iterator_init(&it, bss.tags.parameters, bss.tags.length) != 0)
+						throw std::runtime_error("cannot initialize tag iterator");
+					bool found = false;
+					do {
+						if (it.tag_header->tag_num == BSSID_TAG && it.tag_header->tag_len >= MAC_SIZE_BYTES)
+						{
+							memcpy(m_bssid, it.tag_data, MAC_SIZE_BYTES);
+							found = true;
+							break;
+						}
+						} while (libwifi_tag_iterator_next(&it) != -1);
+					if (!found)
+						memcpy(m_bssid, bss.bssid, MAC_SIZE_BYTES);
+				}
+				else
+					memcpy(m_bssid, bss.bssid, MAC_SIZE_BYTES);
+				found = true;
+			}
+			libwifi_free_bss(&bss);
+			libwifi_free_wifi_frame(&response);
+			if (found)
+				return;
+		}
 	}
 	throw std::invalid_argument("cannot find specified network");
 }
 
 void ConnectionHandler::authenticateNetwork()
 {
+	Helper::setChannel(m_channel);
+	//m_bssid[5] += 1;
+	//todo: check how we send the auth because the response does not get received
 	libwifi_auth auth = {0};
 	libwifi_create_auth(&auth, this->m_bssid, this->m_adapterHandler.getDeviceMac(),
 		this->m_bssid, AUTH_OPEN, TRANSACTION_SEQUENCE_REQ, AUTH_SUCCESS);
@@ -97,13 +121,12 @@ void ConnectionHandler::authenticateNetwork()
 	uint16_t length = libwifi_get_auth_length(&auth);
 	std::vector<uint8_t> packet(length);
 	libwifi_dump_auth(&auth, packet.data(), packet.size());
-
+	Helper::printPacketDebug(packet.data(), packet.size());
 	auto packetHandler = [](const u_char* rawResponse, uint16_t length) -> PacketStatus{
-			Helper::printPacketDebug(rawResponse, length);
-
 			libwifi_frame frameResp = {0};
 			if (!Helper::checkPacket(&frameResp, rawResponse, length, SUBTYPE_AUTH))
 			{
+				std::cout << "type: " << frameResp.frame_control.type << " subtype: " << frameResp.frame_control.subtype << std::endl;
 				libwifi_free_wifi_frame(&frameResp);
 				return WRONG_PACKET_TYPE;
 			}
@@ -113,7 +136,7 @@ void ConnectionHandler::authenticateNetwork()
 
 			auto* auth = reinterpret_cast<libwifi_auth_fixed_parameters *>(frameResp.body);
 
-			if (auth->transaction_sequence == TRANSACTION_SEQUENCE_RESP && auth->status_code != AUTH_SUCCESS)
+			if (auth->transaction_sequence == TRANSACTION_SEQUENCE_RESP && auth->status_code == AUTH_SUCCESS)
 				return SUCCESS;
 			if (auth->transaction_sequence == TRANSACTION_SEQUENCE_RESP && auth->status_code != AUTH_SUCCESS)
 				return FAILED;
@@ -283,7 +306,7 @@ void ConnectionHandler::setSecurity(libwifi_bss* bss)
 		m_rsnTag = nullptr;
 		return;
 	}
-	if (bss->encryption_info & WPA || bss->encryption_info & WEP)
+	if (!(bss->encryption_info & WPA2) && bss->encryption_info & WPA || bss->encryption_info & WEP)
 		throw std::runtime_error("Encryption protocol is too old");
 
 	if (bss->encryption_info & WPA3)

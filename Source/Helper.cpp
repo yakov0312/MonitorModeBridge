@@ -24,6 +24,7 @@ extern "C" {
 #include <openssl/aes.h>
 
 constexpr const char* PTK_LABEL = "Pairwise key expansion";
+constexpr uint8_t MAX_WRONG_PACKET = 5;
 
 AdapterHandler& Helper::m_adapterHandler = AdapterHandler::getInstance();
 
@@ -52,12 +53,15 @@ bool Helper::sendPackets(uint8_t numberOfPackets, const PacketHandlerFunc &packe
 	pcap_pkthdr* header = {0};
 	const u_char* rawResponse = nullptr;
 	bool result = false;
+	int wrongPacketCounter = 0;
 	for (int i = 0; i < numberOfPackets; i++)
 	{
 		//if the last packet was a random packet then dont send again but wait for the prev one
-		if (packetHandlerStatus != PacketStatus::WRONG_PACKET_TYPE &&
+		if (wrongPacketCounter >= MAX_WRONG_PACKET &&
 			pcap_sendpacket(m_adapterHandler.getDeviceHandle(), packet.data(), packet.size()) != 0)
 			throw std::runtime_error("Cannot reach the specified network");
+		if (wrongPacketCounter >= MAX_WRONG_PACKET)
+			wrongPacketCounter = 0;
 
 		status = pcap_next_ex(m_adapterHandler.getDeviceHandle(), &header, &rawResponse);
 		Helper::checkStatus(status, i == numberOfPackets -1);
@@ -73,7 +77,10 @@ bool Helper::sendPackets(uint8_t numberOfPackets, const PacketHandlerFunc &packe
 		if (packetHandlerStatus == PacketStatus::FAILED)
 			throw std::runtime_error("AP returned an error");
 		if (packetHandlerStatus == PacketStatus::WRONG_PACKET_TYPE) //the packet was a random packet
+		{
+			wrongPacketCounter++;
 			i--;
+		}
 	}
 	return false;
 }

@@ -1,20 +1,27 @@
 #include "AdapterHandler.h"
 
+#include <csignal>
 #include <cstring>
 #include <memory>
 #include <ifaddrs.h>
 #include <netpacket/packet.h>
 #include "WifiDefenitions.h"
 
-constexpr uint32_t TIMEOUT = 1000; //10 sec
+constexpr uint32_t TIMEOUT = 5;
 
 AdapterHandler AdapterHandler::m_instance = AdapterHandler();
 
 AdapterHandler::AdapterHandler() : m_device(nullptr), m_deviceHandle(nullptr), m_deviceMac{0},
     m_errFlag(false)
 {
+    system("sudo airmon-ng start wlan0"); //temporary and only for testing later will be using system api
     if (initDevice())
         initDeviceNetwork();
+    atexit(AdapterHandler::setDeviceToManaged);
+    signal(SIGINT, AdapterHandler::setDeviceToManaged);   // Ctrl+C
+    signal(SIGTERM, AdapterHandler::setDeviceToManaged);  // kill
+    signal(SIGHUP, AdapterHandler::setDeviceToManaged);
+    signal(SIGSEGV, AdapterHandler::setDeviceToManaged);
 }
 
 AdapterHandler::~AdapterHandler()
@@ -104,6 +111,16 @@ void AdapterHandler::resolveErrors()
     }
 }
 
+void AdapterHandler::setDeviceToManaged()
+{
+    system("sudo airmon-ng stop wlan0mon"); //temporary and only for testing later will be using system api
+}
+
+void AdapterHandler::setDeviceToManaged(int sig)
+{
+    system("sudo airmon-ng stop wlan0mon"); //temporary and only for testing later will be using system api
+}
+
 u_char* AdapterHandler::getMacOffset(uint64_t* mac)
 {
     u_char* macOffset = nullptr;
@@ -142,3 +159,4 @@ std::string AdapterHandler::getDeviceName() const
 {
     return m_deviceName;
 }
+

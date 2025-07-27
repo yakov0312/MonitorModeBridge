@@ -13,7 +13,6 @@ Manager manager;
 Manager::Manager() : m_network(AdapterHandler::getInstance())
 {
 	m_network.checkErr(); //check if there were errors
-
 }
 
 void Manager::connectToNetwork(const BasicNetworkInfo& networkInfo)
