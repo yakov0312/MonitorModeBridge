@@ -13,7 +13,7 @@ uint8_t RSN_WPA2[] =
 	0x00, 0x0F, 0xAC, 0x04,             // Pairwise Cipher Suite: AES (CCMP) if not supported drop connection
 	0x01, 0x00,                         // AKM Suite Count = 1
 	0x00, 0x0F, 0xAC, 0x00,             // AKM Suite: dynamically changing
-	0x40, 0x00                          // RSN Capabilities: PMF supported
+	0x00, 0x00                          // RSN Capabilities: PMF not supported(0x40, 0x00 for support)
 };
 
 uint8_t RSN_WPA3[] =

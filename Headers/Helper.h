@@ -34,6 +34,7 @@ public:
 	static void checkStatus(uint8_t status, bool conditionResult);
 	static bool checkPacket(libwifi_frame* frame, const uint8_t* rawPacket, uint16_t packetSize, uint8_t subtype);
 	static void addRadioTap(std::vector<uint8_t>& packet, uint8_t channel);
+	static uint32_t computeCrc32(const uint8_t* data, size_t length);
 
 	//encryption related
 	static void getPmk(const std::string& password, uint8_t suite, const std::string& ssid, uint8_t* pmk);

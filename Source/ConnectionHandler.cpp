@@ -28,11 +28,21 @@ ConnectionHandler::ConnectionHandler() : m_adapterHandler(AdapterHandler::getIns
 
 ConnectionHandler::~ConnectionHandler()
 {
+	//todo deauth here for clean up
 }
 
 void ConnectionHandler::connect(const BasicNetworkInfo &network)
 {
-	this->getNetworkInfo(network);
+	if (network.networkName.size() > SSID_SIZE_BYTES)
+		throw std::invalid_argument("Network name is too long");
+
+	if (network.networkName.empty())
+		throw std::invalid_argument("Network name is empty");
+	m_ssid = network.networkName;
+	m_password = network.networkPassword;
+
+	this->getNetworkInfo();
+	m_adapterHandler.setFilters();
 	this->authenticateNetwork();
 	this->associateNetwork();
 	if (m_securityType != NONE_SECURITY)
@@ -40,14 +50,8 @@ void ConnectionHandler::connect(const BasicNetworkInfo &network)
 	this->setIp();
 }
 
-void ConnectionHandler::getNetworkInfo(const BasicNetworkInfo& network)
+void ConnectionHandler::getNetworkInfo()
 {
-	if (network.networkName.size() > SSID_SIZE_BYTES)
-		throw std::invalid_argument("Network name is too long");
-
-	else if (network.networkName.empty())
-		throw std::invalid_argument("Network name is empty");
-
 	uint8_t status = 0;
 	pcap_pkthdr* header = {0};
 	const u_char* rawResponse = nullptr;
@@ -72,30 +76,7 @@ void ConnectionHandler::getNetworkInfo(const BasicNetworkInfo& network)
 			libwifi_bss bss;
 			if (libwifi_parse_beacon(&bss, &response) != 0)
 				throw std::runtime_error("cannot parse the frame");
-			bool found = false;
-			if (memcmp(bss.ssid, network.networkName.data(), network.networkName.size()) == 0)
-			{
-				m_ssid = std::string(bss.ssid, network.networkName.size());
-				memcpy(m_bssid, bss.bssid, MAC_SIZE_BYTES);
-				this->setSecurity(&bss);
-				m_channel = bss.channel;
-				if (bss.tags.length != 0)
-				{
-					struct libwifi_tag_iterator it = {0};
-					if (libwifi_tag_iterator_init(&it, bss.tags.parameters, bss.tags.length) != 0)
-						throw std::runtime_error("Cannot initialize tag iterator");
-					do {
-						if (it.tag_header->tag_num == TAG_SUPP_RATES)
-						{
-							m_supportedRates.insert(m_supportedRates.begin(), it.tag_data, it.tag_data + it.tag_header->tag_len);
-							found = true;
-							break;
-						}
-						} while (libwifi_tag_iterator_next(&it) != -1);
-					if (!found)
-						throw std::runtime_error("Invalid packet: supported rates are not present");
-				}
-			}
+			bool found = this->parseNetworkInfo(&bss);
 			libwifi_free_bss(&bss);
 			libwifi_free_wifi_frame(&response);
 			if (found)
@@ -103,6 +84,35 @@ void ConnectionHandler::getNetworkInfo(const BasicNetworkInfo& network)
 		}
 	}
 	throw std::invalid_argument("cannot find specified network");
+}
+
+bool ConnectionHandler::parseNetworkInfo(const libwifi_bss* bss)
+{
+	bool found = false;
+	if (memcmp(bss->ssid, m_ssid.data(), m_ssid.size()) == 0)
+	{
+		memcpy(m_bssid, bss->bssid, MAC_SIZE_BYTES);
+		this->setSecurity(bss);
+		m_channel = bss->channel;
+		if (bss->tags.length != 0)
+		{
+			struct libwifi_tag_iterator it = {0};
+			if (libwifi_tag_iterator_init(&it, bss->tags.parameters, bss->tags.length) != 0)
+				throw std::runtime_error("Cannot initialize tag iterator");
+			do {
+				if (it.tag_header->tag_num == TAG_SUPP_RATES)
+				{
+					m_supportedRates.insert(m_supportedRates.begin(), it.tag_data, it.tag_data + it.tag_header->tag_len);
+					found = true;
+					break;
+				}
+			} while (libwifi_tag_iterator_next(&it) != -1);
+			if (!found)
+				throw std::runtime_error("Invalid packet: supported rates are not present");
+		}
+		return found;
+	}
+	return found;
 }
 
 void ConnectionHandler::authenticateNetwork()
@@ -126,8 +136,9 @@ void ConnectionHandler::authenticateNetwork()
 			if (frameResp.len <= (frameResp.header_len + sizeof(struct libwifi_auth_fixed_parameters)))
 				return WRONG_PACKET_TYPE;
 
-			auto* auth = reinterpret_cast<libwifi_auth_fixed_parameters *>(frameResp.body);
+			sendAck(frameResp.header.mgmt_unordered.addr2);
 
+			auto* auth = reinterpret_cast<libwifi_auth_fixed_parameters *>(frameResp.body);
 			if (auth->transaction_sequence == TRANSACTION_SEQUENCE_RESP && auth->status_code == AUTH_SUCCESS)
 				return SUCCESS;
 			if (auth->transaction_sequence == TRANSACTION_SEQUENCE_RESP && auth->status_code != AUTH_SUCCESS)
@@ -143,10 +154,11 @@ void ConnectionHandler::associateNetwork()
 {
 	libwifi_assoc_req association = {0};
 	libwifi_create_assoc_req(&association, this->m_bssid, this->m_adapterHandler.getDeviceMac(),
-		this->m_bssid, this->m_ssid.data(), m_channel);
+		this->m_bssid, this->m_ssid.c_str(), m_channel);
+
 	libwifi_quick_add_tag(&association.tags, TAG_SUPP_RATES, m_supportedRates.data(), m_supportedRates.size());
-	if (m_securityType == NONE_SECURITY) //add only if there is a security
-		libwifi_quick_add_tag(&association.tags, TAG_RSN, m_rsnTag, sizeof(m_rsnTag));
+	if (m_securityType != NONE_SECURITY) //add only if there is a security
+		libwifi_quick_add_tag(&association.tags, TAG_RSN, m_rsnTag, RSN_TAG_SIZE);
 
 	uint16_t length = libwifi_get_assoc_req_length(&association);
 	std::vector<uint8_t> packet(length);
@@ -165,7 +177,9 @@ void ConnectionHandler::associateNetwork()
 		{
 			libwifi_free_wifi_frame(&response);
 			return WRONG_PACKET_TYPE;
+
 		}
+		sendAck(response.header.mgmt_ordered.addr2);
 
 		libwifi_assoc_resp_fixed_parameters* params = reinterpret_cast<libwifi_assoc_resp_fixed_parameters *>(response.body);
 		PacketStatus status = FAILED;
@@ -184,11 +198,11 @@ void ConnectionHandler::associateNetwork()
 
 void ConnectionHandler::performHandshake()
 {
-	bpf_program filter;
-	if (pcap_compile(this->m_deviceHandle, &filter, HANDSHAKE_FILTER, 1, PCAP_NETMASK_UNKNOWN) == -1)
-		throw std::runtime_error(pcap_geterr(m_deviceHandle));
-	if (pcap_setfilter(m_deviceHandle, &filter) == -1)
-		throw std::runtime_error(pcap_geterr(m_deviceHandle));
+	// bpf_program filter;
+	// if (pcap_compile(this->m_deviceHandle, &filter, HANDSHAKE_FILTER, 1, PCAP_NETMASK_UNKNOWN) == -1)
+	// 	throw std::runtime_error(pcap_geterr(m_deviceHandle));
+	// if (pcap_setfilter(m_deviceHandle, &filter) == -1)
+	// 	throw std::runtime_error(pcap_geterr(m_deviceHandle));
 
 	if (m_securityType == WPA2 || m_akmSuite == LIBWIFI_AKM_PSK_SHA384)
 		performHandshakeNonSAE(); //connection using normal psk calculations
@@ -275,22 +289,50 @@ void ConnectionHandler::setIp()
 	return;
 }
 
+void ConnectionHandler::sendAck(const uint8_t *receiver)
+{
+
+	AckPacket ack;
+	memcpy(ack.receiver, receiver, MAC_SIZE_BYTES);
+
+	std::vector<uint8_t> ackData(reinterpret_cast<uint8_t*>(&ack), reinterpret_cast<uint8_t*>(&ack) + sizeof(AckPacket) - sizeof(uint32_t));
+
+	uint32_t fcs = Helper::computeCrc32(ackData.data(), ackData.size());
+	// Append FCS in little-endian
+	ackData.push_back(fcs & 0xFF);
+	ackData.push_back((fcs >> 8) & 0xFF);
+	ackData.push_back((fcs >> 16) & 0xFF);
+	ackData.push_back((fcs >> 24) & 0xFF);
+
+	Helper::addRadioTap(ackData, m_channel);
+
+	if (pcap_sendpacket(m_deviceHandle, ackData.data(), ackData.size()) == PCAP_ERROR)
+		throw std::runtime_error("Failed to send ACK");
+}
+
 void ConnectionHandler::getHandshakePacketNonSAE(libwifi_frame* frame)
 {
 	pcap_pkthdr* header;
 	const u_char* packet;
-	bool found = false;
-	while (!found)
+	int status = 0;
+	while (true)
 	{
-		pcap_next_ex(m_deviceHandle, &header, &packet);
+		status = pcap_next_ex(m_deviceHandle, &header, &packet);
+		if (status == PCAP_ERROR || status == 0)
+			continue;
 		if (libwifi_get_wifi_frame(frame, packet, header->caplen, IS_RADIOTAP) != LIBWIFI_SUCCESS)
 			throw std::runtime_error("Failed to parse frame");
+		//todo parse the wpa handshake by myself since it does not recognize the packet
 		if (libwifi_check_wpa_handshake(frame) == LIBWIFI_SUCCESS)
-			found = true;
+		{
+			sendAck(frame->header.mgmt_ordered.addr2);
+			break;
+		}
+
 	}
 }
 
-void ConnectionHandler::setSecurity(libwifi_bss* bss)
+void ConnectionHandler::setSecurity(const libwifi_bss* bss)
 {
 	if (bss->encryption_info == NONE_SECURITY)
 	{

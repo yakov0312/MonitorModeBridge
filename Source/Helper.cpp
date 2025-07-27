@@ -50,7 +50,6 @@ bool Helper::sendPackets(uint8_t numberOfPackets, const PacketHandlerFunc &packe
 	std::vector<uint8_t> &packet, uint8_t channel)
 {
 	Helper::setChannel(channel); //ensure the channel is right
-
 	uint8_t status = 0;
 	PacketStatus packetHandlerStatus = PacketStatus::FAILED;
 	pcap_pkthdr* header = {0};
@@ -140,6 +139,22 @@ void Helper::addRadioTap(std::vector<uint8_t>& packet, uint8_t channel)
 	radiotapHeader[2] = rtapLen & 0xff; //will write it always in little endian no matter what
 	radiotapHeader[3] = (rtapLen >> 8) & 0xff;
 	packet.insert(packet.begin(), radiotapHeader, radiotapHeader + rtapLen);
+}
+
+uint32_t Helper::computeCrc32(const uint8_t *data, size_t length)
+{
+	uint32_t crc = 0xFFFFFFFF;
+	for (size_t i = 0; i < length; ++i) {
+		crc ^= data[i];
+		for (int j = 0; j < 8; ++j) {
+			bool lsb = crc & 1;
+			crc >>= 1;
+			if (lsb) {
+				crc ^= 0xEDB88320;
+			}
+		}
+	}
+	return ~crc;
 }
 
 void Helper::getPmk(const std::string& password, uint8_t suite, const std::string& ssid, uint8_t* pmk)

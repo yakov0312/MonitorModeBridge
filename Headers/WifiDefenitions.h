@@ -57,6 +57,7 @@ constexpr uint8_t PAIR_SUITE_INDEX = 11;
 
 //security related
 constexpr uint8_t NONE_SECURITY = 0;
+constexpr uint8_t RSN_TAG_SIZE = 20;
 
 //eapol related
 constexpr uint8_t VERSION = 2;
@@ -72,12 +73,19 @@ constexpr uint16_t INFORMATION_FLAG_M4 = 0x0300;
 extern uint8_t RSN_WPA2[];
 extern uint8_t RSN_WPA3[];
 
-
 struct BasicNetworkInfo
 {
 	std::string networkName;
 	std::string networkPassword; //optional - based on security
 };
+
+struct HIDDEN AckPacket
+{
+	uint16_t frameControl = 0xD4;  // IEEE 802.11 ACK frame (type=Ctrl, subtype=ACK)
+	uint16_t duration = 0;
+	uint8_t receiver[MAC_SIZE_BYTES]; // Receiver MAC (Addr1)
+	uint32_t fcs; //layer calculated
+} __attribute__((packed));
 
 struct HIDDEN wpaKeyInfo {
 	uint16_t information;

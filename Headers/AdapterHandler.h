@@ -21,6 +21,8 @@ public:
 	static u_char* getMacOffset(uint64_t* mac);
 	static void setDeviceToManaged();
 	static void setDeviceToManaged(int sig);
+	void setFilters();
+	void removeFilters();
 
 	//getters
 	[[nodiscard]] bool getErr() const;

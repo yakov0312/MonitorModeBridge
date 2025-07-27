@@ -18,18 +18,20 @@ public:
 	void connect(const BasicNetworkInfo &network);
 private:
 
-	void getNetworkInfo(const BasicNetworkInfo &network);
+	void getNetworkInfo();
+	bool parseNetworkInfo(const libwifi_bss* bss);
 	void authenticateNetwork();
 	void associateNetwork();
 	void performHandshake();
 	void setIp(); //using dhcp
+	void sendAck(const uint8_t* receiver);
 
 	void getHandshakePacketNonSAE(libwifi_frame* frame);
 	void performHandshakeNonSAE();
 	void performHandshakeSAE();
 
 	//helpers
-	void setSecurity(libwifi_bss* bss);
+	void setSecurity(const libwifi_bss* bss);
 
 	uint8_t m_channel;
 	uint16_t m_aid;
