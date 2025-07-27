@@ -7,7 +7,6 @@
 
 int main()
 {
-	system("sudo airmon-ng start wlan0");
 	try
 	{
 		manager.connectToNetwork(BasicNetworkInfo("Dudnik", "054642400"));
@@ -16,5 +15,4 @@ int main()
 	{
 		std::cout << e.what() << std::endl;
 	}
-	system("sudo airmon-ng stop wlan0mon");
 }

@@ -27,12 +27,13 @@ public:
 	using PacketHandlerFunc = std::function<PacketStatus(const unsigned char*, uint16_t)>;
 
 	//adapter related
-	static uint8_t setChannel(uint8_t channel);
+	static void setChannel(uint8_t channel);
 
 	//packet related
-	static bool sendPackets(uint8_t numberOfPackets, const PacketHandlerFunc& packetHandler, const std::vector<uint8_t>& packet);
+	static bool sendPackets(uint8_t numberOfPackets, const PacketHandlerFunc& packetHandler, std::vector<uint8_t>& packet, uint8_t channel);
 	static void checkStatus(uint8_t status, bool conditionResult);
 	static bool checkPacket(libwifi_frame* frame, const uint8_t* rawPacket, uint16_t packetSize, uint8_t subtype);
+	static void addRadioTap(std::vector<uint8_t>& packet, uint8_t channel);
 
 	//encryption related
 	static void getPmk(const std::string& password, uint8_t suite, const std::string& ssid, uint8_t* pmk);

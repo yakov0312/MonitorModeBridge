@@ -9,10 +9,10 @@
 
 constexpr uint32_t TIMEOUT = 5;
 
-AdapterHandler AdapterHandler::m_instance = AdapterHandler();
+AdapterHandler AdapterHandler::m_instance = AdapterHandler(DEFAULT_RATE);
 
-AdapterHandler::AdapterHandler() : m_device(nullptr), m_deviceHandle(nullptr), m_deviceMac{0},
-    m_errFlag(false)
+AdapterHandler::AdapterHandler(uint8_t rate) : m_device(nullptr), m_deviceHandle(nullptr), m_deviceMac{0},
+    m_errFlag(false), m_deviceRate(rate)
 {
     system("sudo airmon-ng start wlan0"); //temporary and only for testing later will be using system api
     if (initDevice())
@@ -158,5 +158,15 @@ const uint8_t * AdapterHandler::getDeviceMac() const
 std::string AdapterHandler::getDeviceName() const
 {
     return m_deviceName;
+}
+
+uint8_t AdapterHandler::getDeviceRate() const
+{
+    return m_deviceRate;
+}
+
+void AdapterHandler::setDeviceRate(uint16_t rate)
+{
+    m_deviceRate = rate;
 }
 

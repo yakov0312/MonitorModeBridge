@@ -2,7 +2,7 @@
 // Created by yakov on 6/16/25.
 //
 #include "Helper.h"
-
+#include <chrono>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
@@ -16,38 +16,41 @@
 #include <linux/wireless.h>
 
 #include "WifiDefenitions.h"
+
 extern "C" {
+#include "libwifi/gen/misc/radiotap.h"
 #include "libwifi/core/misc/security.h"
+#include "libwifi/core/radiotap/radiotap.h"
 }
 #include "openssl/evp.h"
 #include "openssl/hmac.h"
-#include <openssl/aes.h>
 
 constexpr const char* PTK_LABEL = "Pairwise key expansion";
-constexpr uint8_t MAX_WRONG_PACKET = 5;
+constexpr uint8_t MAX_WRONG_PACKET = 10;
 
 AdapterHandler& Helper::m_adapterHandler = AdapterHandler::getInstance();
 
-uint8_t Helper::setChannel(uint8_t channel)
+void Helper::setChannel(uint8_t channel)
 {
 	int sock = socket(AF_INET, SOCK_DGRAM, 0);
-	if (sock < 0) return -1;
+	if (sock < 0) throw std::runtime_error("Cannot init socket");
 
 	iwreq wrq;
 	memset(&wrq, 0, sizeof(wrq));
 	strncpy(wrq.ifr_name, m_adapterHandler.getDeviceName().data(), IFNAMSIZ);
-
 	wrq.u.freq.m = 2412 + 5 * (channel - 1);
 	wrq.u.freq.e = 6;
 
-	int result = ioctl(sock, SIOCSIWFREQ, &wrq);
+	if (ioctl(sock, SIOCSIWFREQ, &wrq) != 0)
+		throw std::runtime_error("Can't set channel");
 	close(sock);
-	return result;
 }
 
 bool Helper::sendPackets(uint8_t numberOfPackets, const PacketHandlerFunc &packetHandler,
-	const std::vector<uint8_t> &packet)
+	std::vector<uint8_t> &packet, uint8_t channel)
 {
+	Helper::setChannel(channel); //ensure the channel is right
+
 	uint8_t status = 0;
 	PacketStatus packetHandlerStatus = PacketStatus::FAILED;
 	pcap_pkthdr* header = {0};
@@ -56,6 +59,7 @@ bool Helper::sendPackets(uint8_t numberOfPackets, const PacketHandlerFunc &packe
 	int wrongPacketCounter = 0;
 	for (int i = 0; i < numberOfPackets; i++)
 	{
+		Helper::addRadioTap(packet, channel);
 		//if the last packet was a random packet then dont send again but wait for the prev one
 		if (wrongPacketCounter >= MAX_WRONG_PACKET &&
 			pcap_sendpacket(m_adapterHandler.getDeviceHandle(), packet.data(), packet.size()) != 0)
@@ -100,6 +104,42 @@ bool Helper::checkPacket(libwifi_frame *frame, const uint8_t *rawPacket, uint16_
 	else if (frame->frame_control.type == TYPE_MANAGEMENT && frame->frame_control.subtype == subtype)
 		return true;
 	return false;
+}
+
+void Helper::addRadioTap(std::vector<uint8_t>& packet, uint8_t channel)
+{
+	libwifi_radiotap_info info = {0};
+
+	info.present =
+		(1 << IEEE80211_RADIOTAP_TSFT)       |
+		(1 << IEEE80211_RADIOTAP_FLAGS)      |
+		(1 << IEEE80211_RADIOTAP_RATE)       |
+		(1 << IEEE80211_RADIOTAP_CHANNEL);
+
+	auto now = std::chrono::steady_clock::now();
+	auto us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
+	info.timestamp.timestamp = static_cast<uint64_t>(us);
+	info.timestamp.accuracy = 0;
+	info.timestamp.unit = 0;
+	info.timestamp.flags = 0;
+
+	info.flags = 0x00;
+	info.rate_raw = Helper::m_adapterHandler.getDeviceRate();
+	info.channel.freq = 2412 + 5 * (channel - 1);
+	info.channel.flags = 0x00a0;
+
+	char radiotapHeader[LIBWIFI_MAX_RADIOTAP_LEN] = {0};
+	libwifi_create_radiotap(&info, radiotapHeader); //return an invalid size(12 instead of 18)
+	size_t rtapLen = RADIOTAP_SIZE;
+	//if there is already radiotap - remove it(done for loop usage, it can save up runtime and resources by not coping it each time)
+	if (packet.size() >= 4 && (uint8_t)packet[0] == 0) {
+		uint16_t existing_len = packet[2] | (packet[3] << 8);
+		if (existing_len <= packet.size())
+			packet.erase(packet.begin(), packet.begin() + existing_len);
+	}
+	radiotapHeader[2] = rtapLen & 0xff; //will write it always in little endian no matter what
+	radiotapHeader[3] = (rtapLen >> 8) & 0xff;
+	packet.insert(packet.begin(), radiotapHeader, radiotapHeader + rtapLen);
 }
 
 void Helper::getPmk(const std::string& password, uint8_t suite, const std::string& ssid, uint8_t* pmk)
@@ -212,8 +252,6 @@ void Helper::setMic(wpaAuthData &m2WpaData, const uint8_t *ptk, int akmSuite)
 	memcpy(m2WpaData.keyInfo.mic, micOutput, sizeof(m2WpaData.keyInfo.mic));
 }
 
-#include <openssl/evp.h>
-
 void Helper::decryptGtk(const uint8_t *ptk, uint8_t suite, const uint8_t *encryptedGtk, size_t encryptedLen,
 						uint8_t *decryptedGtk)
 {
@@ -254,6 +292,6 @@ int Helper::getKekLength(uint8_t suite)
 void Helper::printPacketDebug(const u_char *packet, uint32_t length)
 {
 	std::cout << std::hex << std::setfill('0');
-	for (int i =0; i < length; i++)
-		std::cout << std::setw(2) << static_cast<int>(packet[i]) << ' ';
+	for (size_t i = 0; i < length; ++i)
+		std::cout << std::setw(2) << static_cast<unsigned>(packet[i]) << ' ';
 }

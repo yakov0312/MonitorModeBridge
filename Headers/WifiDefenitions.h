@@ -4,6 +4,12 @@
 #include "AdapterHandler.h"
 #include "string"
 
+//libwifi error size related
+constexpr uint16_t RADIOTAP_SIZE = 22;
+
+//rates
+constexpr uint8_t DEFAULT_RATE = 2;
+
 //ap related
 constexpr uint8_t SSID_SIZE_BYTES = 32;
 
@@ -15,7 +21,6 @@ constexpr uint8_t PROBE_REQUEST_COUNT = 3;
 constexpr uint8_t MAX_AUTH_ATTEMPTS = 3;
 constexpr uint8_t MAX_ASSOC_ATTEMPTS = 3;
 
-
 //adapter related
 constexpr uint8_t CHANNELS = 15; //there are 14 channels(channel 14 is only in japan)
 constexpr uint8_t SUPPORTED_RATES_BITMASK = 0x8F;
@@ -25,7 +30,6 @@ constexpr uint16_t TRANSACTION_SEQUENCE_REQ = 1;
 constexpr uint16_t TRANSACTION_SEQUENCE_RESP = 2;
 constexpr uint8_t AUTH_SUCCESS = 0;
 constexpr uint8_t ASSOC_SUCCESS = 0;
-constexpr uint8_t BSSID_TAG = 0x0e;
 
 //libwifi related
 extern bool IS_RADIOTAP;

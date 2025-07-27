@@ -15,7 +15,9 @@ Manager::Manager() : m_network(AdapterHandler::getInstance())
 	m_network.checkErr(); //check if there were errors
 }
 
-void Manager::connectToNetwork(const BasicNetworkInfo& networkInfo)
+void Manager::connectToNetwork(const BasicNetworkInfo& networkInfo, std::optional<uint8_t> rate)
 {
+	if (rate.has_value())
+		m_network.setDeviceRate(rate.value());
 	this->m_connection.connect(networkInfo);
 }

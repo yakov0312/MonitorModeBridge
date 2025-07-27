@@ -3,6 +3,8 @@
 //
 #pragma once
 
+#include <vector>
+
 #include "WifiDefenitions.h"
 
 struct libwifi_bss;
@@ -43,5 +45,7 @@ private:
 	AdapterHandler& m_adapterHandler;
 	pcap_t* m_deviceHandle;
 
+	//ap
 	std::string m_password;
+	std::vector<uint8_t> m_supportedRates;
 };
