@@ -17,7 +17,6 @@ constexpr uint8_t SSID_SIZE_BYTES = 32;
 constexpr uint8_t BROADCAST_MAC_ADDRESS[MAC_SIZE_BYTES] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
 
 //max attempts
-constexpr uint8_t PROBE_REQUEST_COUNT = 3;
 constexpr uint8_t MAX_AUTH_ATTEMPTS = 3;
 constexpr uint8_t MAX_ASSOC_ATTEMPTS = 3;
 

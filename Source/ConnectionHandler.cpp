@@ -17,7 +17,6 @@ extern "C" {
 }
 #include <iomanip> //for debug
 
-#define PACKET_HANDLER(X) (const u_char* rawResponse, uint16_t length) -> PacketStatus { X }
 
 ConnectionHandler::ConnectionHandler() : m_adapterHandler(AdapterHandler::getInstance()),
 	m_deviceHandle(m_adapterHandler.getDeviceHandle()), m_channel(0), m_aid(0), m_akmSuite(0),
@@ -53,36 +52,35 @@ void ConnectionHandler::connect(const BasicNetworkInfo &network)
 void ConnectionHandler::getNetworkInfo()
 {
 	uint8_t status = 0;
-	pcap_pkthdr* header = {0};
-	const u_char* rawResponse = nullptr;
+	libwifi_frame frame = {0};
+	uint8_t counter =0;
 	for (m_channel = 1; m_channel < CHANNELS; m_channel++)
 	{
 		Helper::setChannel(m_channel); //set the channel
-
-		for (int i =0; i < PROBE_REQUEST_COUNT;i++)
+		for (counter =0; counter < BEACON_COUNT; counter++)
 		{
-			status = pcap_next_ex(m_adapterHandler.getDeviceHandle(), &header, &rawResponse);
-			Helper::checkStatus(status, i == PROBE_REQUEST_COUNT -1);
-			if (status == 0)
+			if (receivePacket(&frame) == -1)
 				continue;
-
-			libwifi_frame response = {0};
-			if (!Helper::checkPacket(&response, rawResponse, header->caplen, SUBTYPE_BEACON))
+			if (!(frame.frame_control.type == TYPE_MANAGEMENT && frame.frame_control.subtype == SUBTYPE_BEACON))
 			{
-				i--;
+				libwifi_free_wifi_frame(&frame);
 				continue;
 			}
 
 			libwifi_bss bss;
-			if (libwifi_parse_beacon(&bss, &response) != 0)
+			if (libwifi_parse_beacon(&bss, &frame) != 0)
+			{
+				libwifi_free_wifi_frame(&frame);
 				throw std::runtime_error("cannot parse the frame");
+			}
 			bool found = this->parseNetworkInfo(&bss);
 			libwifi_free_bss(&bss);
-			libwifi_free_wifi_frame(&response);
+			libwifi_free_wifi_frame(&frame);
 			if (found)
 				return;
 		}
 	}
+
 	throw std::invalid_argument("cannot find specified network");
 }
 
@@ -124,32 +122,43 @@ void ConnectionHandler::authenticateNetwork()
 	uint16_t length = libwifi_get_auth_length(&auth);
 	std::vector<uint8_t> packet(length);
 	libwifi_dump_auth(&auth, packet.data(), packet.size());
-	auto packetHandler = [this](const u_char* rawResponse, uint16_t length) -> PacketStatus{
-			libwifi_frame frameResp = {0};
-			if (!Helper::checkPacket(&frameResp, rawResponse, length, SUBTYPE_AUTH))
-			{
-				//std::cout << "type: " << frameResp.frame_control.type << " subtype: " << frameResp.frame_control.subtype << std::endl;
-				libwifi_free_wifi_frame(&frameResp);
-				return WRONG_PACKET_TYPE;
-			}
 
-			if (frameResp.len <= (frameResp.header_len + sizeof(struct libwifi_auth_fixed_parameters)))
-				return WRONG_PACKET_TYPE;
+	libwifi_frame frame = {0};
+	for (uint8_t counter =0; counter < MAX_AUTH_ATTEMPTS; counter++)
+	{
+		this->sendPacket(packet);
+		recvPacket:
+		if (this->receivePacket(&frame) == -1)
+			continue;
 
-			sendAck(frameResp.header.mgmt_unordered.addr2);
+		if (frame.frame_control.type == TYPE_CONTROL && frame.frame_control.subtype == SUBTYPE_ACK)
+		{
+			libwifi_free_wifi_frame(&frame);
+			goto recvPacket; //if it is an ack then dont sent it again just wait for the auth packet
+		}
+		if (!(frame.frame_control.type == TYPE_MANAGEMENT && frame.frame_control.subtype != SUBTYPE_AUTH))
+		{
+			libwifi_free_wifi_frame(&frame);
+			continue;
+		}
+		if (frame.len <= (frame.header_len + sizeof(struct libwifi_auth_fixed_parameters)))
+		{
+			libwifi_free_wifi_frame(&frame);
+			continue;//if it is not an ack, because of the filter we put earlier the ap sent something else and the packet didnt reach him
+		}
+			auto* auth = reinterpret_cast<libwifi_auth_fixed_parameters *>(frame.body);
+		if (auth->transaction_sequence == TRANSACTION_SEQUENCE_RESP && auth->status_code == AUTH_SUCCESS)
+		{
+			libwifi_free_wifi_frame(&frame);
+			return;
+		}
+		libwifi_free_wifi_frame(&frame);
+		throw std::runtime_error("Ap returned status failed to authenticate. If the network is busy please try again later");
+	}
 
-			auto* auth = reinterpret_cast<libwifi_auth_fixed_parameters *>(frameResp.body);
-			if (auth->transaction_sequence == TRANSACTION_SEQUENCE_RESP && auth->status_code == AUTH_SUCCESS)
-				return SUCCESS;
-			if (auth->transaction_sequence == TRANSACTION_SEQUENCE_RESP && auth->status_code != AUTH_SUCCESS)
-				return FAILED;
-			return INVALID_PACKET;
-	};
-
-	if (!Helper::sendPackets(MAX_AUTH_ATTEMPTS, packetHandler, packet, m_channel))
-		throw std::runtime_error("cannot authenticate to the network");
+	throw std::runtime_error("Cannot authenticate to the network. Please check connection and signal strength");
 }
-
+//todo add a function to avoid code duplication(the function should check the subtype and type)
 void ConnectionHandler::associateNetwork()
 {
 	libwifi_assoc_req association = {0};
@@ -165,45 +174,45 @@ void ConnectionHandler::associateNetwork()
 	libwifi_dump_assoc_req(&association, packet.data(), packet.size());
 	libwifi_free_assoc_req(&association);
 
-	auto packetHandler = [this](const u_char* rawResponse, uint16_t length) -> PacketStatus{
-		libwifi_frame response = {0};
-		if (!Helper::checkPacket(&response, rawResponse, length, SUBTYPE_ASSOC_RESP))
+	libwifi_frame frame = {0};
+	for (uint8_t counter =0; counter < MAX_AUTH_ATTEMPTS; counter++)
+	{
+		this->sendPacket(packet);
+		recvPacket:
+		if (this->receivePacket(&frame) == -1)
+			continue;
+
+		if (frame.frame_control.type == TYPE_CONTROL && frame.frame_control.subtype == SUBTYPE_ACK)
 		{
-			libwifi_free_wifi_frame(&response); //free the frame
-			return WRONG_PACKET_TYPE;
+			libwifi_free_wifi_frame(&frame);
+			goto recvPacket; //if it is an ack then dont sent it again just wait for the auth packet
+		}
+		if (!(frame.frame_control.type == TYPE_MANAGEMENT && frame.frame_control.subtype != SUBTYPE_ASSOC_RESP))
+		{
+			libwifi_free_wifi_frame(&frame);
+			continue;
+		}
+		if (frame.len <= (frame.header_len + sizeof(struct libwifi_assoc_resp_fixed_parameters)))
+		{
+			libwifi_free_wifi_frame(&frame);
+			continue;//if it is not an ack, because of the filter we put earlier the ap sent something else and the packet didnt reach him
 		}
 
-		if (response.len <= (response.header_len + sizeof(struct libwifi_assoc_resp_fixed_parameters)))
-		{
-			libwifi_free_wifi_frame(&response);
-			return WRONG_PACKET_TYPE;
-
-		}
-		sendAck(response.header.mgmt_ordered.addr2);
-
-		libwifi_assoc_resp_fixed_parameters* params = reinterpret_cast<libwifi_assoc_resp_fixed_parameters *>(response.body);
-		PacketStatus status = FAILED;
+		libwifi_assoc_resp_fixed_parameters* params = reinterpret_cast<libwifi_assoc_resp_fixed_parameters *>(frame.body);
 
 		if (params->status_code == ASSOC_SUCCESS)
 		{
 			m_aid = params->association_id;
-			status = SUCCESS;
+			libwifi_free_wifi_frame(&frame);
+			return;
 		}
-		libwifi_free_wifi_frame(&response);
-		return status;
-	};
-	if (!Helper::sendPackets(MAX_ASSOC_ATTEMPTS,packetHandler, packet, m_channel))
-		throw std::runtime_error("cannot authenticate to the network");
+		libwifi_free_wifi_frame(&frame);
+		throw std::runtime_error("Ap returned status failed to assoc. If the network is busy please try again later");
+	}
 }
 
 void ConnectionHandler::performHandshake()
 {
-	// bpf_program filter;
-	// if (pcap_compile(this->m_deviceHandle, &filter, HANDSHAKE_FILTER, 1, PCAP_NETMASK_UNKNOWN) == -1)
-	// 	throw std::runtime_error(pcap_geterr(m_deviceHandle));
-	// if (pcap_setfilter(m_deviceHandle, &filter) == -1)
-	// 	throw std::runtime_error(pcap_geterr(m_deviceHandle));
-
 	if (m_securityType == WPA2 || m_akmSuite == LIBWIFI_AKM_PSK_SHA384)
 		performHandshakeNonSAE(); //connection using normal psk calculations
 	else
@@ -257,7 +266,9 @@ void ConnectionHandler::performHandshakeNonSAE()
 		default: throw std::runtime_error("Invalid akm suite");}
 	wpaDataResp.keyInfo.information = htons(wpaDataResp.keyInfo.information);
 	Helper::setMic(wpaDataResp, ptk, m_akmSuite);
-	if (pcap_sendpacket(m_deviceHandle, reinterpret_cast<const u_char*>(&wpaDataResp), sizeof(wpaDataResp)) == PCAP_ERROR)
+	std::vector<uint8_t> m2((uint8_t*)&wpaDataResp, (uint8_t*)&wpaDataResp + sizeof(wpaDataResp));
+	Helper::addRadioTap(m2, m_channel);
+	if (pcap_sendpacket(m_deviceHandle, m2.data(), sizeof(wpaDataResp)) == PCAP_ERROR)
 		throw std::runtime_error("Failed to send m2");
 	memset(&frame, 0, sizeof(frame));
 	getHandshakePacketNonSAE(&frame);
@@ -322,10 +333,9 @@ void ConnectionHandler::getHandshakePacketNonSAE(libwifi_frame* frame)
 			continue;
 		if (libwifi_get_wifi_frame(frame, packet, header->caplen, IS_RADIOTAP) != LIBWIFI_SUCCESS)
 			throw std::runtime_error("Failed to parse frame");
-		//todo parse the wpa handshake by myself since it does not recognize the packet
-		if (libwifi_check_wpa_handshake(frame) == LIBWIFI_SUCCESS)
+		if (libwifi_check_wpa_handshake(frame) > 0)
 		{
-			sendAck(frame->header.mgmt_ordered.addr2);
+			sendAck(frame->header.data.addr2);
 			break;
 		}
 
@@ -389,4 +399,58 @@ void ConnectionHandler::setSecurity(const libwifi_bss* bss)
 
 	m_rsnTag[GROUP_SUITE_INDEX] = bss->rsn_info.group_cipher_suite.suite_type;
 	m_rsnTag[AKM_TYPE_INDEX] = m_akmSuite;
+}
+
+void ConnectionHandler::sendPacket(std::vector<uint8_t> &packet) const
+{
+	Helper::addRadioTap(packet, m_channel);
+	if (pcap_sendpacket(m_adapterHandler.getDeviceHandle(), packet.data(), packet.size()) != 0)
+		throw std::runtime_error("Cannot reach the specified network");
+}
+
+uint8_t ConnectionHandler::receivePacket(libwifi_frame *frame)
+{
+	uint8_t status = 0;
+	pcap_pkthdr* header = {0};
+	const u_char* rawResponse = nullptr;
+	uint8_t counter = 0;
+	getPacket:
+		status = pcap_next_ex(m_adapterHandler.getDeviceHandle(), &header, &rawResponse);
+	if (status == PCAP_ERROR)
+		throw std::runtime_error(pcap_geterr(AdapterHandler::getInstance().getDeviceHandle()));
+	if (counter == MAX_TIMEOUTS)
+		return -1;
+	if (status == 0) //timeout
+	{
+		goto getPacket;
+		counter++;
+	}
+	if (libwifi_get_wifi_frame(frame, rawResponse, header->caplen, IS_RADIOTAP) != 0)
+		throw std::runtime_error("cannot parse the frame");
+	//because of the filter that will be put on after the beacon parse only packets that are ment for this device will be parsed so we need to ignore the requests and acks
+	uint8_t type = frame->frame_control.type;
+	uint8_t subtype = frame->frame_control.subtype;
+	if (type != TYPE_CONTROL)
+	{
+		uint8_t* receiver = nullptr;
+		uint8_t* destination = nullptr;
+
+		if (type == TYPE_DATA && subtype != SUBTYPE_DATA_NULL && subtype != SUBTYPE_DATA_QOS_NULL) {
+			receiver = frame->header.data.addr2;
+			destination = frame->header.data.addr1;
+		}
+		else if (type == TYPE_MANAGEMENT) {
+			if (subtype == SUBTYPE_AUTH  || subtype == SUBTYPE_ASSOC_RESP ||
+				subtype == SUBTYPE_REASSOC_RESP || subtype == SUBTYPE_ACTION || subtype == SUBTYPE_PROBE_RESP) {
+				receiver = frame->header.mgmt_unordered.addr2;
+				destination = frame->header.mgmt_unordered.addr1;
+				}
+		}
+
+		if (receiver != nullptr && destination != nullptr &&
+			memcmp(destination, m_adapterHandler.getDeviceMac(), MAC_SIZE_BYTES) == 0)
+			sendAck(receiver);
+	}
+
+	return 0;
 }

@@ -46,65 +46,6 @@ void Helper::setChannel(uint8_t channel)
 	close(sock);
 }
 
-bool Helper::sendPackets(uint8_t numberOfPackets, const PacketHandlerFunc &packetHandler,
-	std::vector<uint8_t> &packet, uint8_t channel)
-{
-	Helper::setChannel(channel); //ensure the channel is right
-	uint8_t status = 0;
-	PacketStatus packetHandlerStatus = PacketStatus::FAILED;
-	pcap_pkthdr* header = {0};
-	const u_char* rawResponse = nullptr;
-	bool result = false;
-	int wrongPacketCounter = 0;
-	for (int i = 0; i < numberOfPackets; i++)
-	{
-		Helper::addRadioTap(packet, channel);
-		//if the last packet was a random packet then dont send again but wait for the prev one
-		if (wrongPacketCounter >= MAX_WRONG_PACKET &&
-			pcap_sendpacket(m_adapterHandler.getDeviceHandle(), packet.data(), packet.size()) != 0)
-			throw std::runtime_error("Cannot reach the specified network");
-		if (wrongPacketCounter >= MAX_WRONG_PACKET)
-			wrongPacketCounter = 0;
-
-		status = pcap_next_ex(m_adapterHandler.getDeviceHandle(), &header, &rawResponse);
-		Helper::checkStatus(status, i == numberOfPackets -1);
-		if (status == 0)
-		{
-			packetHandlerStatus = PacketStatus::FAILED; //restore the status
-			continue;
-		}
-
-		packetHandlerStatus = packetHandler(rawResponse, header->caplen);
-		if (packetHandlerStatus == PacketStatus::SUCCESS)
-			return true;
-		if (packetHandlerStatus == PacketStatus::FAILED)
-			throw std::runtime_error("AP returned an error");
-		if (packetHandlerStatus == PacketStatus::WRONG_PACKET_TYPE) //the packet was a random packet
-		{
-			wrongPacketCounter++;
-			i--;
-		}
-	}
-	return false;
-}
-
-void Helper::checkStatus(uint8_t status, bool conditionResult)
-{
-	if (status == PCAP_ERROR)
-		throw std::runtime_error(pcap_geterr(AdapterHandler::getInstance().getDeviceHandle()));
-	else if (status != 1 && conditionResult)
-		throw std::runtime_error("Cannot reach the specified network");
-}
-
-bool Helper::checkPacket(libwifi_frame *frame, const uint8_t *rawPacket, uint16_t packetSize, uint8_t subtype)
-{
-	if (libwifi_get_wifi_frame(frame, rawPacket, packetSize, IS_RADIOTAP) != 0)
-		throw std::runtime_error("cannot parse the frame");
-	else if (frame->frame_control.type == TYPE_MANAGEMENT && frame->frame_control.subtype == subtype)
-		return true;
-	return false;
-}
-
 void Helper::addRadioTap(std::vector<uint8_t>& packet, uint8_t channel)
 {
 	libwifi_radiotap_info info = {0};

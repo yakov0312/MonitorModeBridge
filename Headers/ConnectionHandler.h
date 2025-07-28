@@ -10,6 +10,9 @@
 struct libwifi_bss;
 struct libwifi_frame;
 
+constexpr uint8_t MAX_TIMEOUTS = 5;
+constexpr uint8_t BEACON_COUNT = 4;
+
 class ConnectionHandler
 {
 public:
@@ -24,14 +27,19 @@ private:
 	void associateNetwork();
 	void performHandshake();
 	void setIp(); //using dhcp
+
+	//maintain connection
 	void sendAck(const uint8_t* receiver);
 
+	//handshake related
 	void getHandshakePacketNonSAE(libwifi_frame* frame);
 	void performHandshakeNonSAE();
 	void performHandshakeSAE();
 
 	//helpers
 	void setSecurity(const libwifi_bss* bss);
+	void sendPacket(std::vector<uint8_t>& packet) const;
+	uint8_t receivePacket(libwifi_frame* frame);
 
 	uint8_t m_channel;
 	uint16_t m_aid;

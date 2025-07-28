@@ -24,15 +24,12 @@ enum HIDDEN PacketStatus
 class HIDDEN Helper
 {
 public:
-	using PacketHandlerFunc = std::function<PacketStatus(const unsigned char*, uint16_t)>;
+	using PacketHandlerFunc = std::function<PacketStatus(libwifi_frame*, uint16_t)>;
 
 	//adapter related
 	static void setChannel(uint8_t channel);
 
 	//packet related
-	static bool sendPackets(uint8_t numberOfPackets, const PacketHandlerFunc& packetHandler, std::vector<uint8_t>& packet, uint8_t channel);
-	static void checkStatus(uint8_t status, bool conditionResult);
-	static bool checkPacket(libwifi_frame* frame, const uint8_t* rawPacket, uint16_t packetSize, uint8_t subtype);
 	static void addRadioTap(std::vector<uint8_t>& packet, uint8_t channel);
 	static uint32_t computeCrc32(const uint8_t* data, size_t length);
 
