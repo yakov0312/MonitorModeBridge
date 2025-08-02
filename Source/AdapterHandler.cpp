@@ -5,14 +5,13 @@
 #include <memory>
 #include <ifaddrs.h>
 #include <netpacket/packet.h>
-#include "WifiDefenitions.h"
 
-constexpr uint32_t TIMEOUT = 5;
+constexpr uint32_t TIMEOUT = 100;
 
-AdapterHandler AdapterHandler::m_instance = AdapterHandler(DEFAULT_RATE);
+AdapterHandler AdapterHandler::m_instance = AdapterHandler();
 
-AdapterHandler::AdapterHandler(uint8_t rate) : m_device(nullptr), m_deviceHandle(nullptr), m_deviceMac{0},
-    m_errFlag(false), m_deviceRate(rate)
+AdapterHandler::AdapterHandler() : m_device(nullptr), m_deviceHandle(nullptr), m_deviceMac{0},
+    m_errFlag(false)
 {
     system("sudo airmon-ng start wlan0 > /dev/null 2>&1"); //temporary and only for testing later will be using system api
     if (initDevice())
@@ -102,19 +101,24 @@ bool AdapterHandler::initDeviceNetwork()
     return true;
 }
 
+void AdapterHandler::resolveErrors()
+{
+    if (initDevice())
+        if (initDeviceNetwork())
+            m_errFlag = false;
+}
+
 void AdapterHandler::setFilters()
 {
     char buf[18]; // 6 * 2 hex + 5 colons + 1 null terminator = 18
     snprintf(buf, sizeof(buf), "%02x:%02x:%02x:%02x:%02x:%02x",
              m_deviceMac[0], m_deviceMac[1], m_deviceMac[2], m_deviceMac[3], m_deviceMac[4], m_deviceMac[5]);
     std::string mac = buf;
-    std::string filter_exp = "wlan addr1 " + mac +
-                         " or wlan addr2 " + mac +
-                         " or wlan addr3 " + mac;
+    std::string filterExp = "wlan addr1 " + mac + " and not ((wlan[0] & 0x0C) == 0x04)";
 
     struct bpf_program fp;
-    if (pcap_compile(m_deviceHandle, &fp, filter_exp.c_str(), 1, PCAP_NETMASK_UNKNOWN) == PCAP_ERROR
-        && pcap_setfilter(m_deviceHandle, &fp) == PCAP_ERROR)
+    if (pcap_compile(m_deviceHandle, &fp, filterExp.c_str(), 1, PCAP_NETMASK_UNKNOWN) == PCAP_ERROR
+        || pcap_setfilter(m_deviceHandle, &fp) == PCAP_ERROR)
         throw std::runtime_error("Cannot set up filters");
     pcap_freecode(&fp);
 }
@@ -128,13 +132,6 @@ void AdapterHandler::removeFilters()
         && pcap_setfilter(m_deviceHandle, &fp) == PCAP_ERROR)
         throw std::runtime_error("Cannot remove filters");
     pcap_freecode(&fp);
-}
-
-void AdapterHandler::resolveErrors()
-{
-    if (initDevice())
-        if (initDeviceNetwork())
-            m_errFlag = false;
 }
 
 void AdapterHandler::setDeviceToManaged()
@@ -184,15 +181,5 @@ const uint8_t * AdapterHandler::getDeviceMac() const
 std::string AdapterHandler::getDeviceName() const
 {
     return m_deviceName;
-}
-
-uint8_t AdapterHandler::getDeviceRate() const
-{
-    return m_deviceRate;
-}
-
-void AdapterHandler::setDeviceRate(uint16_t rate)
-{
-    m_deviceRate = rate;
 }
 

@@ -1,26 +1,20 @@
 //
 // Created by yakov on 6/16/25.
 //
-#include "Helper.h"
+#include "EncryptionHelper.h"
 #include <chrono>
 #include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <stdexcept>
-#include <unistd.h>
 #include <vector>
 #include <pcap/pcap.h>
 #include "AdapterHandler.h"
-#include <sys/ioctl.h>
-#include <net/if.h>
-#include <linux/wireless.h>
 
 #include "WifiDefenitions.h"
 
 extern "C" {
-#include "libwifi/gen/misc/radiotap.h"
 #include "libwifi/core/misc/security.h"
-#include "libwifi/core/radiotap/radiotap.h"
 }
 #include "openssl/evp.h"
 #include "openssl/hmac.h"
@@ -28,77 +22,9 @@ extern "C" {
 constexpr const char* PTK_LABEL = "Pairwise key expansion";
 constexpr uint8_t MAX_WRONG_PACKET = 10;
 
-AdapterHandler& Helper::m_adapterHandler = AdapterHandler::getInstance();
+AdapterHandler& EncryptionHelper::m_adapterHandler = AdapterHandler::getInstance();
 
-void Helper::setChannel(uint8_t channel)
-{
-	int sock = socket(AF_INET, SOCK_DGRAM, 0);
-	if (sock < 0) throw std::runtime_error("Cannot init socket");
-
-	iwreq wrq;
-	memset(&wrq, 0, sizeof(wrq));
-	strncpy(wrq.ifr_name, m_adapterHandler.getDeviceName().data(), IFNAMSIZ);
-	wrq.u.freq.m = 2412 + 5 * (channel - 1);
-	wrq.u.freq.e = 6;
-
-	if (ioctl(sock, SIOCSIWFREQ, &wrq) != 0)
-		throw std::runtime_error("Can't set channel");
-	close(sock);
-}
-
-void Helper::addRadioTap(std::vector<uint8_t>& packet, uint8_t channel)
-{
-	libwifi_radiotap_info info = {0};
-
-	info.present =
-		(1 << IEEE80211_RADIOTAP_TSFT)       |
-		(1 << IEEE80211_RADIOTAP_FLAGS)      |
-		(1 << IEEE80211_RADIOTAP_RATE)       |
-		(1 << IEEE80211_RADIOTAP_CHANNEL);
-
-	auto now = std::chrono::steady_clock::now();
-	auto us = std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count();
-	info.timestamp.timestamp = static_cast<uint64_t>(us);
-	info.timestamp.accuracy = 0;
-	info.timestamp.unit = 0;
-	info.timestamp.flags = 0;
-
-	info.flags = 0x00;
-	info.rate_raw = Helper::m_adapterHandler.getDeviceRate();
-	info.channel.freq = 2412 + 5 * (channel - 1);
-	info.channel.flags = 0x00a0;
-
-	char radiotapHeader[LIBWIFI_MAX_RADIOTAP_LEN] = {0};
-	libwifi_create_radiotap(&info, radiotapHeader); //return an invalid size(12 instead of 18)
-	size_t rtapLen = RADIOTAP_SIZE;
-	//if there is already radiotap - remove it(done for loop usage, it can save up runtime and resources by not coping it each time)
-	if (packet.size() >= 4 && (uint8_t)packet[0] == 0) {
-		uint16_t existing_len = packet[2] | (packet[3] << 8);
-		if (existing_len <= packet.size())
-			packet.erase(packet.begin(), packet.begin() + existing_len);
-	}
-	radiotapHeader[2] = rtapLen & 0xff; //will write it always in little endian no matter what
-	radiotapHeader[3] = (rtapLen >> 8) & 0xff;
-	packet.insert(packet.begin(), radiotapHeader, radiotapHeader + rtapLen);
-}
-
-uint32_t Helper::computeCrc32(const uint8_t *data, size_t length)
-{
-	uint32_t crc = 0xFFFFFFFF;
-	for (size_t i = 0; i < length; ++i) {
-		crc ^= data[i];
-		for (int j = 0; j < 8; ++j) {
-			bool lsb = crc & 1;
-			crc >>= 1;
-			if (lsb) {
-				crc ^= 0xEDB88320;
-			}
-		}
-	}
-	return ~crc;
-}
-
-void Helper::getPmk(const std::string& password, uint8_t suite, const std::string& ssid, uint8_t* pmk)
+void EncryptionHelper::getPmk(const std::string& password, uint8_t suite, const std::string& ssid, uint8_t* pmk)
 {
 	if (pmk == nullptr)
 		throw std::invalid_argument("invalid pmk ptr");
@@ -113,7 +39,7 @@ void Helper::getPmk(const std::string& password, uint8_t suite, const std::strin
 		throw std::invalid_argument("invalid suite");
 }
 
-void Helper::getPtkData(uint8_t* data, const uint8_t* nonce1, const uint8_t* nonce2, const uint8_t *mac1)
+void EncryptionHelper::getPtkData(uint8_t* data, const uint8_t* nonce1, const uint8_t* nonce2, const uint8_t *mac1)
 {
 	if (data == nullptr || nonce1 == nullptr || nonce2 == nullptr || mac1 == nullptr)
 		throw std::invalid_argument("invalid pointers");
@@ -131,7 +57,7 @@ void Helper::getPtkData(uint8_t* data, const uint8_t* nonce1, const uint8_t* non
 	memcpy(data + MAC_SIZE_BYTES * 2 + NONCE_SIZE, nonce2, NONCE_SIZE);
 }
 
-void Helper::getPtk(uint8_t* ptk, const uint8_t* pmk, const uint8_t* data, uint8_t suite)
+void EncryptionHelper::getPtk(uint8_t* ptk, const uint8_t* pmk, const uint8_t* data, uint8_t suite)
 {
 	const EVP_MD* digest = nullptr;
 	size_t pmkSize = 0;
@@ -182,9 +108,9 @@ void Helper::getPtk(uint8_t* ptk, const uint8_t* pmk, const uint8_t* data, uint8
 	}
 }
 
-void Helper::setMic(wpaAuthData &m2WpaData, const uint8_t *ptk, int akmSuite)
+void EncryptionHelper::setMic(EapolFrame &eapol, const uint8_t *ptk, int akmSuite)
 {
-	memset(m2WpaData.keyInfo.mic, 0, sizeof(m2WpaData.keyInfo.mic));
+	memset(eapol.keyDesc.mic, 0, MIC_SIZE);
 
 	// Select hash function based on suite
 	const EVP_MD* md = nullptr;
@@ -202,13 +128,14 @@ void Helper::setMic(wpaAuthData &m2WpaData, const uint8_t *ptk, int akmSuite)
 	unsigned int micLen = 0;
 	uint8_t micOutput[EVP_MAX_MD_SIZE];
 
+	uint8_t* startOffset = (uint8_t*)&eapol.eapolHeader;
 	// Calculate HMAC over the whole m2WpaData struct
-	if (!HMAC(md, kck, KCK_SIZE, reinterpret_cast<uint8_t*>(&m2WpaData), sizeof(m2WpaData), micOutput, &micLen))
+	if (!HMAC(md, kck, KCK_SIZE, startOffset, sizeof(EAPOLHeader) + sizeof(WPA2KeyDesc) + RSN_INFO_SIZE, micOutput, &micLen))
 		throw std::runtime_error("HMAC calculation failed");
-	memcpy(m2WpaData.keyInfo.mic, micOutput, sizeof(m2WpaData.keyInfo.mic));
+	memcpy(eapol.keyDesc.mic, micOutput, MIC_SIZE);
 }
 
-void Helper::decryptGtk(const uint8_t *ptk, uint8_t suite, const uint8_t *encryptedGtk, size_t encryptedLen,
+void EncryptionHelper::decryptGtk(const uint8_t *ptk, uint8_t suite, const uint8_t *encryptedGtk, size_t encryptedLen,
 						uint8_t *decryptedGtk)
 {
 	int kekLen = getKekLength(suite);
@@ -235,7 +162,7 @@ void Helper::decryptGtk(const uint8_t *ptk, uint8_t suite, const uint8_t *encryp
 }
 
 
-int Helper::getKekLength(uint8_t suite)
+int EncryptionHelper::getKekLength(uint8_t suite)
 {
 	switch (suite) {
 		case AKM_SUITE_PSK:
@@ -245,7 +172,7 @@ int Helper::getKekLength(uint8_t suite)
 	}
 }
 
-void Helper::printPacketDebug(const u_char *packet, uint32_t length)
+void EncryptionHelper::printPacketDebug(const u_char *packet, uint32_t length)
 {
 	std::cout << std::hex << std::setfill('0');
 	for (size_t i = 0; i < length; ++i)

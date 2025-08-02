@@ -1,11 +1,8 @@
 #pragma once
-#include <optional>
 #include <string>
 
-#include "attributeControl.h"
 #include "pcap.h"
-
-constexpr uint8_t MAC_SIZE_BYTES = 6;
+#include "WifiDefenitions.h"
 
 class AdapterHandler
 {
@@ -17,12 +14,13 @@ public:
 	void checkErr() const;
 	void resolveErrors();
 
+	void setFilters();
+	void removeFilters();
+
 	//helper
 	static u_char* getMacOffset(uint64_t* mac);
 	static void setDeviceToManaged();
 	static void setDeviceToManaged(int sig);
-	void setFilters();
-	void removeFilters();
 
 	//getters
 	[[nodiscard]] bool getErr() const;
@@ -30,12 +28,10 @@ public:
 	[[nodiscard]] pcap_t* getDeviceHandle() const;
 	[[nodiscard]] const uint8_t* getDeviceMac() const;
 	[[nodiscard]] std::string getDeviceName() const;
-	[[nodiscard]] uint8_t getDeviceRate() const;
 
-	void setDeviceRate(uint16_t rate);
 
 private:
-	AdapterHandler(uint8_t rate);
+	AdapterHandler();
 
 	//initialize
 	bool initDevice();
@@ -49,8 +45,8 @@ private:
 	pcap_t* m_deviceHandle;
 	uint8_t m_deviceMac[MAC_SIZE_BYTES];
 	std::string m_deviceName;
-	uint8_t m_deviceRate;
 
 	//flags
 	bool m_errFlag;
+
 };

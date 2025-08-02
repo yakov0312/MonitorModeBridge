@@ -4,14 +4,17 @@
 #pragma once
 
 #include <vector>
+#include <pcap/pcap.h>
 
 #include "WifiDefenitions.h"
+#include "AdapterHandler.h"
+#include "PacketHandler.h"
 
+struct libwifi_wpa_auth_data;
 struct libwifi_bss;
 struct libwifi_frame;
 
 constexpr uint8_t MAX_TIMEOUTS = 5;
-constexpr uint8_t BEACON_COUNT = 4;
 
 class ConnectionHandler
 {
@@ -28,20 +31,15 @@ private:
 	void performHandshake();
 	void setIp(); //using dhcp
 
-	//maintain connection
-	void sendAck(const uint8_t* receiver);
-
 	//handshake related
-	void getHandshakePacketNonSAE(libwifi_frame* frame);
+	std::optional<libwifi_frame> getHandshakePacketNonSAE();
 	void performHandshakeNonSAE();
 	void performHandshakeSAE();
+	std::pair<EapolFrame, std::vector<uint8_t>> createM2(const libwifi_wpa_auth_data& wpaData);
 
 	//helpers
 	void setSecurity(const libwifi_bss* bss);
-	void sendPacket(std::vector<uint8_t>& packet) const;
-	uint8_t receivePacket(libwifi_frame* frame);
 
-	uint8_t m_channel;
 	uint16_t m_aid;
 	uint8_t m_securityType;
 	uint8_t* m_rsnTag;
@@ -58,4 +56,8 @@ private:
 	//ap
 	std::string m_password;
 	std::vector<uint8_t> m_supportedRates;
+
+	const uint8_t* m_deviceMac;
+
+	PacketHandler m_packetHandler;
 };

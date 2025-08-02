@@ -3,12 +3,13 @@
 //
 #include "ConnectionHandler.h"
 
-#include <algorithm>
 #include <cstring>
+#include <format>
 #include <iostream>
 #include <stdexcept>
+#include <vector>
 
-#include "Helper.h"
+#include "EncryptionHelper.h"
 #include <openssl/evp.h>
 #include <sys/random.h>
 
@@ -19,9 +20,9 @@ extern "C" {
 
 
 ConnectionHandler::ConnectionHandler() : m_adapterHandler(AdapterHandler::getInstance()),
-	m_deviceHandle(m_adapterHandler.getDeviceHandle()), m_channel(0), m_aid(0), m_akmSuite(0),
+	m_deviceHandle(m_adapterHandler.getDeviceHandle()), m_aid(0), m_akmSuite(0),
 	m_bssid{0}, m_groupSuite(0), m_pairSuite(0), m_password(""), m_rsnTag(0), m_securityType(0),
-	m_ssid("")
+	m_ssid(""), m_deviceMac(m_adapterHandler.getDeviceMac()), m_gtkKey{}, m_packetHandler()
 {
 }
 
@@ -40,8 +41,10 @@ void ConnectionHandler::connect(const BasicNetworkInfo &network)
 	m_ssid = network.networkName;
 	m_password = network.networkPassword;
 
+	this->m_adapterHandler.setFilters();
+	m_packetHandler.toggleSniffing();
+
 	this->getNetworkInfo();
-	m_adapterHandler.setFilters();
 	this->authenticateNetwork();
 	this->associateNetwork();
 	if (m_securityType != NONE_SECURITY)
@@ -51,36 +54,55 @@ void ConnectionHandler::connect(const BasicNetworkInfo &network)
 
 void ConnectionHandler::getNetworkInfo()
 {
-	uint8_t status = 0;
-	libwifi_frame frame = {0};
-	uint8_t counter =0;
-	for (m_channel = 1; m_channel < CHANNELS; m_channel++)
+	libwifi_probe_req req = {0};
+	std::vector<uint8_t> probeReq;
+	libwifi_frame* framePtr = nullptr;
+	std::optional<libwifi_frame> frame = std::nullopt;
+
+	uint8_t channel = 0;
+	uint8_t probeSize = 0;
+
+	libwifi_create_probe_req(&req, BROADCAST_MAC_ADDRESS, m_deviceMac, BROADCAST_MAC_ADDRESS, m_ssid.data(), 1);
+	probeSize = libwifi_get_probe_req_length(&req);
+	probeReq.resize(probeSize);
+	libwifi_dump_probe_req(&req, probeReq.data(), probeReq.size());
+	libwifi_free_probe_req(&req);
+	for (channel = 1; channel <= CHANNELS; channel++)
 	{
-		Helper::setChannel(m_channel); //set the channel
-		for (counter =0; counter < BEACON_COUNT; counter++)
+		m_packetHandler.setChannel(channel);
+		for (int i = 0; i < PROBE_COUNT; i++)
 		{
-			if (receivePacket(&frame) == -1)
-				continue;
-			if (!(frame.frame_control.type == TYPE_MANAGEMENT && frame.frame_control.subtype == SUBTYPE_BEACON))
-			{
-				libwifi_free_wifi_frame(&frame);
-				continue;
-			}
+			m_packetHandler.sendPacket(probeReq);
 
-			libwifi_bss bss;
-			if (libwifi_parse_beacon(&bss, &frame) != 0)
+			while (m_packetHandler.waitForPacket(MAX_WAITING_TIME))
 			{
-				libwifi_free_wifi_frame(&frame);
-				throw std::runtime_error("cannot parse the frame");
+				frame = m_packetHandler.getPacket();
+				if (!frame.has_value())
+					break;
+				framePtr = &frame.value();
+
+				if (!(framePtr->frame_control.type == TYPE_MANAGEMENT && framePtr->frame_control.subtype == SUBTYPE_PROBE_RESP))
+				{
+					libwifi_free_wifi_frame(framePtr);
+					continue;
+				}
+
+				libwifi_bss bss = {0};
+				if (libwifi_parse_probe_resp(&bss, framePtr) != 0)
+				{
+					libwifi_free_wifi_frame(framePtr);
+					throw std::runtime_error("cannot parse the frame");
+				}
+				bool found = this->parseNetworkInfo(&bss);
+				m_packetHandler.changeMacAp(bss.bssid);
+				libwifi_free_bss(&bss);
+				libwifi_free_wifi_frame(framePtr);
+				if (found)
+					return;
 			}
-			bool found = this->parseNetworkInfo(&bss);
-			libwifi_free_bss(&bss);
-			libwifi_free_wifi_frame(&frame);
-			if (found)
-				return;
 		}
+		probeReq[probeReq.size() -1] = channel + 1;
 	}
-
 	throw std::invalid_argument("cannot find specified network");
 }
 
@@ -91,7 +113,6 @@ bool ConnectionHandler::parseNetworkInfo(const libwifi_bss* bss)
 	{
 		memcpy(m_bssid, bss->bssid, MAC_SIZE_BYTES);
 		this->setSecurity(bss);
-		m_channel = bss->channel;
 		if (bss->tags.length != 0)
 		{
 			struct libwifi_tag_iterator it = {0};
@@ -108,107 +129,113 @@ bool ConnectionHandler::parseNetworkInfo(const libwifi_bss* bss)
 			if (!found)
 				throw std::runtime_error("Invalid packet: supported rates are not present");
 		}
-		return found;
+		return true;
 	}
-	return found;
+	return false;
 }
 
 void ConnectionHandler::authenticateNetwork()
 {
 	libwifi_auth auth = {0};
-	libwifi_create_auth(&auth, this->m_bssid, this->m_adapterHandler.getDeviceMac(),
+	libwifi_create_auth(&auth, this->m_bssid, m_deviceMac,
 		this->m_bssid, AUTH_OPEN, TRANSACTION_SEQUENCE_REQ, AUTH_SUCCESS);
 
 	uint16_t length = libwifi_get_auth_length(&auth);
 	std::vector<uint8_t> packet(length);
 	libwifi_dump_auth(&auth, packet.data(), packet.size());
-
-	libwifi_frame frame = {0};
-	for (uint8_t counter =0; counter < MAX_AUTH_ATTEMPTS; counter++)
+	libwifi_free_auth(&auth);
+	libwifi_frame* framePtr = nullptr;
+	std::optional<libwifi_frame> frame;
+	for (uint8_t counter = 0; counter < MAX_AUTH_ATTEMPTS; counter++)
 	{
-		this->sendPacket(packet);
-		recvPacket:
-		if (this->receivePacket(&frame) == -1)
-			continue;
+		m_packetHandler.sendPacket(packet);
 
-		if (frame.frame_control.type == TYPE_CONTROL && frame.frame_control.subtype == SUBTYPE_ACK)
+		while (m_packetHandler.waitForPacket(MAX_WAITING_TIME))
 		{
-			libwifi_free_wifi_frame(&frame);
-			goto recvPacket; //if it is an ack then dont sent it again just wait for the auth packet
+
+			frame = m_packetHandler.getPacket();
+			if (!frame.has_value())
+				break;
+			framePtr = &frame.value();
+			if (!(framePtr->frame_control.type == TYPE_MANAGEMENT && framePtr->frame_control.subtype == SUBTYPE_AUTH))
+			{
+				libwifi_free_wifi_frame(&frame.value());
+				continue;
+			}
+			if (framePtr->len <= (framePtr->header_len + sizeof(struct libwifi_auth_fixed_parameters)))
+			{
+				libwifi_free_wifi_frame(&frame.value());
+				continue;
+			}
+			auto* auth = reinterpret_cast<libwifi_auth_fixed_parameters *>(framePtr->body);
+			if (auth->status_code == AUTH_SUCCESS)
+			{
+				libwifi_free_wifi_frame(framePtr);
+				return;
+			}
+			libwifi_free_wifi_frame(framePtr);
+			throw std::runtime_error("Auth: Ap returned status failed to authenticate. If the network is busy please try again later");
 		}
-		if (!(frame.frame_control.type == TYPE_MANAGEMENT && frame.frame_control.subtype != SUBTYPE_AUTH))
-		{
-			libwifi_free_wifi_frame(&frame);
-			continue;
-		}
-		if (frame.len <= (frame.header_len + sizeof(struct libwifi_auth_fixed_parameters)))
-		{
-			libwifi_free_wifi_frame(&frame);
-			continue;//if it is not an ack, because of the filter we put earlier the ap sent something else and the packet didnt reach him
-		}
-			auto* auth = reinterpret_cast<libwifi_auth_fixed_parameters *>(frame.body);
-		if (auth->transaction_sequence == TRANSACTION_SEQUENCE_RESP && auth->status_code == AUTH_SUCCESS)
-		{
-			libwifi_free_wifi_frame(&frame);
-			return;
-		}
-		libwifi_free_wifi_frame(&frame);
-		throw std::runtime_error("Ap returned status failed to authenticate. If the network is busy please try again later");
 	}
 
 	throw std::runtime_error("Cannot authenticate to the network. Please check connection and signal strength");
 }
-//todo add a function to avoid code duplication(the function should check the subtype and type)
+
 void ConnectionHandler::associateNetwork()
 {
 	libwifi_assoc_req association = {0};
-	libwifi_create_assoc_req(&association, this->m_bssid, this->m_adapterHandler.getDeviceMac(),
-		this->m_bssid, this->m_ssid.c_str(), m_channel);
+	libwifi_create_assoc_req(&association, this->m_bssid, m_deviceMac,
+		this->m_bssid, this->m_ssid.c_str(), PacketHandler::getChannel());
 
 	libwifi_quick_add_tag(&association.tags, TAG_SUPP_RATES, m_supportedRates.data(), m_supportedRates.size());
 	if (m_securityType != NONE_SECURITY) //add only if there is a security
-		libwifi_quick_add_tag(&association.tags, TAG_RSN, m_rsnTag, RSN_TAG_SIZE);
+		libwifi_quick_add_tag(&association.tags, TAG_RSN, m_rsnTag, RSN_INFO_SIZE);
 
 	uint16_t length = libwifi_get_assoc_req_length(&association);
 	std::vector<uint8_t> packet(length);
 	libwifi_dump_assoc_req(&association, packet.data(), packet.size());
 	libwifi_free_assoc_req(&association);
 
-	libwifi_frame frame = {0};
-	for (uint8_t counter =0; counter < MAX_AUTH_ATTEMPTS; counter++)
+	libwifi_frame* framePtr = nullptr;
+	std::optional<libwifi_frame> frame;
+	m_packetHandler.emptyQueue();
+	for (uint8_t counter = 0; counter < MAX_ASSOC_ATTEMPTS; counter++)
 	{
-		this->sendPacket(packet);
-		recvPacket:
-		if (this->receivePacket(&frame) == -1)
-			continue;
+		m_packetHandler.sendPacket(packet);
 
-		if (frame.frame_control.type == TYPE_CONTROL && frame.frame_control.subtype == SUBTYPE_ACK)
+		while (m_packetHandler.waitForPacket(MAX_WAITING_TIME))
 		{
-			libwifi_free_wifi_frame(&frame);
-			goto recvPacket; //if it is an ack then dont sent it again just wait for the auth packet
-		}
-		if (!(frame.frame_control.type == TYPE_MANAGEMENT && frame.frame_control.subtype != SUBTYPE_ASSOC_RESP))
-		{
-			libwifi_free_wifi_frame(&frame);
-			continue;
-		}
-		if (frame.len <= (frame.header_len + sizeof(struct libwifi_assoc_resp_fixed_parameters)))
-		{
-			libwifi_free_wifi_frame(&frame);
-			continue;//if it is not an ack, because of the filter we put earlier the ap sent something else and the packet didnt reach him
-		}
+			frame = m_packetHandler.getPacket();
+			if (!frame.has_value())
+				break;
+			framePtr = &frame.value();
 
-		libwifi_assoc_resp_fixed_parameters* params = reinterpret_cast<libwifi_assoc_resp_fixed_parameters *>(frame.body);
+			//check for invalid packet format
+			if (!(framePtr->frame_control.type == TYPE_MANAGEMENT && framePtr->frame_control.subtype == SUBTYPE_ASSOC_RESP))
+			{
+				libwifi_free_wifi_frame(&frame.value());
+				continue;
+			}
+			if (framePtr->len <= (framePtr->header_len + sizeof(struct libwifi_assoc_resp_fixed_parameters)))
+			{
+				libwifi_free_wifi_frame(framePtr);
+				continue;
 
-		if (params->status_code == ASSOC_SUCCESS)
-		{
-			m_aid = params->association_id;
-			libwifi_free_wifi_frame(&frame);
-			return;
+			}
+
+			libwifi_assoc_resp_fixed_parameters* params = reinterpret_cast<libwifi_assoc_resp_fixed_parameters *>(framePtr->body);
+
+			if (params->status_code == ASSOC_SUCCESS)
+			{
+				m_aid = params->association_id;
+				libwifi_free_wifi_frame(framePtr);
+				return;
+			}
+			libwifi_free_wifi_frame(framePtr);
+			throw std::runtime_error("Ap returned status failed to assoc. If the network is busy please try again later");
 		}
-		libwifi_free_wifi_frame(&frame);
-		throw std::runtime_error("Ap returned status failed to assoc. If the network is busy please try again later");
 	}
+	throw std::runtime_error("Assoc: Ap is not responding please try again later the network might be busy");
 }
 
 void ConnectionHandler::performHandshake()
@@ -221,71 +248,55 @@ void ConnectionHandler::performHandshake()
 
 void ConnectionHandler::performHandshakeNonSAE()
 {
-	libwifi_frame frame = {0};
-	getHandshakePacketNonSAE(&frame);
+	std::optional<libwifi_frame> frame;
+	libwifi_frame* framePtr = nullptr;
+	for (int i =0; i<= MAX_EAPOL_RECEIVE; i++)
+	{
+		frame = getHandshakePacketNonSAE();
+		if (frame.has_value())
+			break;
+	}
+	if (!frame.has_value())
+		throw std::runtime_error("Ap is not starting the eapol handshake");
+	framePtr = &frame.value();
 
 	libwifi_wpa_auth_data wpaData;
-	if (libwifi_get_wpa_data(&frame, &wpaData) != 0)
+	if (libwifi_get_wpa_data(framePtr, &wpaData) != 0)
 		throw std::runtime_error("Failed to parse WPA data");
-	if (libwifi_check_wpa_message(&frame) != HANDSHAKE_M1)
+	if (libwifi_check_wpa_message(framePtr) != HANDSHAKE_M1)
 		throw std::runtime_error("Invalid wpa data");
+	auto [eapol, ptk] = createM2(wpaData);
+	memcpy(eapol.frameHeader.addr1, m_bssid, MAC_SIZE_BYTES);
+	memcpy(eapol.frameHeader.addr2, m_deviceMac, MAC_SIZE_BYTES);
+	memcpy(eapol.frameHeader.addr3, m_bssid, MAC_SIZE_BYTES);
 
-	uint8_t pmk[MAX_PMK_SIZE] = {0};
-	Helper::getPmk(m_password, m_akmSuite, m_ssid, pmk);
-	//calculate data for ptk
-	uint8_t data[PTK_DATA_SIZE] = {0};
+	std::vector<uint8_t> m2((uint8_t*)&eapol, (uint8_t*)&eapol + sizeof(eapol));
+	libwifi_free_wifi_frame(framePtr);
 
-	uint8_t sNonce[NONCE_SIZE];
-	if (getrandom(sNonce, sizeof(sNonce), 0) != sizeof(sNonce))
-		throw std::invalid_argument("Failed to generate SNonce");
-
-	Helper::getPtkData(data, wpaData.key_info.nonce, sNonce, m_bssid);
-	uint8_t ptk[PTK_SIZE] = {0};
-	Helper::getPtk(ptk, pmk, data, m_akmSuite);
-
-	//construct the m2
-	wpaAuthData wpaDataResp {
-		.version = VERSION,
-		.type = EAPOL_KEY_INFO,
-		.length = htons(sizeof(wpaKeyInfo)),
-		.descriptorType = WPA2_Key_Descriptor,
-		.keyInfo{
-			.information = INFORMATION_FLAG_M2,
-			.keyLength = 0,
-			.replayCounter = wpaData.key_info.replay_counter,
-			.iv = {0},
-			.rsc = 0,
-			.id = 0,
-			.mic = {0}
-		}
-	};
-	switch(m_akmSuite) {
-		case AKM_SUITE_PSK: wpaDataResp.keyInfo.information += AKM_SUITE_PSK_VERSION; break;
-		case AKM_SUITE_PSK_SHA256: wpaDataResp.keyInfo.information += AKM_SUITE_PSK_SHA256_VERSION; break;
-		case AKM_PSK_SHA384: wpaDataResp.keyInfo.information += AKM_PSK_SHAE384_VERSION; break;
-		default: throw std::runtime_error("Invalid akm suite");}
-	wpaDataResp.keyInfo.information = htons(wpaDataResp.keyInfo.information);
-	Helper::setMic(wpaDataResp, ptk, m_akmSuite);
-	std::vector<uint8_t> m2((uint8_t*)&wpaDataResp, (uint8_t*)&wpaDataResp + sizeof(wpaDataResp));
-	Helper::addRadioTap(m2, m_channel);
-	if (pcap_sendpacket(m_deviceHandle, m2.data(), sizeof(wpaDataResp)) == PCAP_ERROR)
-		throw std::runtime_error("Failed to send m2");
-	memset(&frame, 0, sizeof(frame));
-	getHandshakePacketNonSAE(&frame);
+	for (int i = 0; i <= MAX_EAPOL_SEND; i++)
+	{
+		m_packetHandler.sendPacket(m2);
+		frame = getHandshakePacketNonSAE();
+		if (frame.has_value())
+			break;
+	}
+	if (!frame.has_value())
+		throw std::runtime_error("Ap is not starting the eapol handshake");
+	framePtr = &frame.value();
 
 	memset(&wpaData, 0, sizeof(wpaData));
-	if (libwifi_get_wpa_data(&frame, &wpaData) != 0)
+	if (libwifi_get_wpa_data(framePtr, &wpaData) != 0)
 		throw std::runtime_error("Failed to parse WPA data");
-	if (libwifi_check_wpa_message(&frame) != HANDSHAKE_M3)
+	if (libwifi_check_wpa_message(framePtr) != HANDSHAKE_M3)
 		throw std::runtime_error("Invalid wpa data");
 
-	Helper::decryptGtk(ptk, m_akmSuite, wpaData.key_info.key_data,
+	EncryptionHelper::decryptGtk(ptk.data(), m_akmSuite, wpaData.key_info.key_data,
 		wpaData.key_info.key_data_length, m_gtkKey);
 
-	wpaDataResp.keyInfo.information = htons(INFORMATION_FLAG_M4);
-	wpaDataResp.keyInfo.replayCounter = wpaData.key_info.replay_counter;
-	Helper::setMic(wpaDataResp, ptk, m_akmSuite);
-	if (pcap_sendpacket(m_deviceHandle, reinterpret_cast<const u_char*>(&wpaDataResp), sizeof(wpaDataResp)) == PCAP_ERROR)
+	eapol.keyDesc.keyInfo = htons(INFORMATION_FLAG_M4);
+	eapol.keyDesc.replayCounter = wpaData.key_info.replay_counter;
+	EncryptionHelper::setMic(eapol, ptk.data(), m_akmSuite);
+	if (pcap_sendpacket(m_deviceHandle, reinterpret_cast<const u_char*>(&eapol), sizeof(eapol)) == PCAP_ERROR)
 		throw std::runtime_error("Failed to send m4");
 	//handshake finished(no SAE)
 }
@@ -295,51 +306,81 @@ void ConnectionHandler::performHandshakeSAE()
 	return;
 }
 
+std::pair<EapolFrame, std::vector<uint8_t>> ConnectionHandler::createM2(const libwifi_wpa_auth_data& wpaData)
+{
+	uint8_t pmk[MAX_PMK_SIZE] = {0};
+	EncryptionHelper::getPmk(m_password, m_akmSuite, m_ssid, pmk);
+	//calculate data for ptk
+	uint8_t data[PTK_DATA_SIZE] = {0};
+
+	uint8_t sNonce[NONCE_SIZE];
+	if (getrandom(sNonce, sizeof(sNonce), 0) != sizeof(sNonce))
+		throw std::invalid_argument("Failed to generate SNonce");
+
+	EncryptionHelper::getPtkData(data, wpaData.key_info.nonce, sNonce, m_bssid);
+	uint8_t ptk[PTK_SIZE] = {0};
+	EncryptionHelper::getPtk(ptk, pmk, data, m_akmSuite);
+
+	//construct the m2
+	EapolFrame eapol {
+		.keyDesc = {
+			.replayCounter = wpaData.key_info.replay_counter,
+		}
+	};
+	uint16_t keyInfo = INFORMATION_FLAG_M2;
+
+	switch (m_akmSuite) {
+		case AKM_SUITE_PSK:         keyInfo |= AKM_SUITE_PSK_VERSION; break;
+		case AKM_SUITE_PSK_SHA256:  keyInfo |= AKM_SUITE_PSK_SHA256_VERSION; break;
+		case AKM_PSK_SHA384:        keyInfo |= AKM_PSK_SHAE384_VERSION; break;
+		default: throw std::runtime_error("Invalid akm suite");
+	}
+
+	uint16_t keyLen = 0;
+	switch (m_pairSuite) {
+		case CIPHER_SUITE_CCMP128: keyLen = htons(16); break;
+		case CIPHER_SUITE_CCMP256: keyLen = htons(32); break;
+		case CIPHER_SUITE_GCMP128: keyLen = htons(16); break;
+		case CIPHER_SUITE_GCMP256: keyLen = htons(32); break;
+		default:
+			throw std::runtime_error("Unsupported pairwise cipher suite for WPA2");
+	}
+
+	eapol.keyDesc.keyLength = keyLen;
+	eapol.keyDesc.keyInfo= htons(keyInfo);
+
+	memcpy(eapol.keyDesc.nonce, sNonce, NONCE_SIZE);
+	EncryptionHelper::setMic(eapol, ptk, m_akmSuite);
+
+	return {eapol, std::vector<uint8_t>(ptk, ptk + PTK_SIZE)};
+}
+
 void ConnectionHandler::setIp()
 {
 	return;
 }
 
-void ConnectionHandler::sendAck(const uint8_t *receiver)
+
+std::optional<libwifi_frame> ConnectionHandler::getHandshakePacketNonSAE()
 {
-
-	AckPacket ack;
-	memcpy(ack.receiver, receiver, MAC_SIZE_BYTES);
-
-	std::vector<uint8_t> ackData(reinterpret_cast<uint8_t*>(&ack), reinterpret_cast<uint8_t*>(&ack) + sizeof(AckPacket) - sizeof(uint32_t));
-
-	uint32_t fcs = Helper::computeCrc32(ackData.data(), ackData.size());
-	// Append FCS in little-endian
-	ackData.push_back(fcs & 0xFF);
-	ackData.push_back((fcs >> 8) & 0xFF);
-	ackData.push_back((fcs >> 16) & 0xFF);
-	ackData.push_back((fcs >> 24) & 0xFF);
-
-	Helper::addRadioTap(ackData, m_channel);
-
-	if (pcap_sendpacket(m_deviceHandle, ackData.data(), ackData.size()) == PCAP_ERROR)
-		throw std::runtime_error("Failed to send ACK");
-}
-
-void ConnectionHandler::getHandshakePacketNonSAE(libwifi_frame* frame)
-{
-	pcap_pkthdr* header;
-	const u_char* packet;
-	int status = 0;
-	while (true)
+	libwifi_frame* framePtr = nullptr;
+	std::optional<libwifi_frame> frame;
+	while (!m_packetHandler.waitForPacket(MAX_WAITING_TIME))
 	{
-		status = pcap_next_ex(m_deviceHandle, &header, &packet);
-		if (status == PCAP_ERROR || status == 0)
-			continue;
-		if (libwifi_get_wifi_frame(frame, packet, header->caplen, IS_RADIOTAP) != LIBWIFI_SUCCESS)
-			throw std::runtime_error("Failed to parse frame");
-		if (libwifi_check_wpa_handshake(frame) > 0)
-		{
-			sendAck(frame->header.data.addr2);
+		frame = m_packetHandler.getPacket();
+		if (!frame.has_value())
 			break;
-		}
+		framePtr = &frame.value();
 
+		if (framePtr->frame_control.type == TYPE_DATA && framePtr->frame_control.subtype == SUBTYPE_DATA_NULL)
+		{
+			libwifi_free_wifi_frame(framePtr);
+			continue;
+		}
+		if (libwifi_check_wpa_handshake(framePtr) > 0)
+			return frame.value();
 	}
+	return std::nullopt;
 }
 
 void ConnectionHandler::setSecurity(const libwifi_bss* bss)
@@ -356,17 +397,6 @@ void ConnectionHandler::setSecurity(const libwifi_bss* bss)
 	if (bss->encryption_info & WPA3)
 	{
 		m_securityType = WPA3;
-		//pairwise suite selection
-		if (bss->encryption_info & LIBWIFI_PAIRWISE_CIPHER_SUITE_GCMP256)
-			m_pairSuite = CIPHER_SUITE_GCMP256;
-		else if (bss->encryption_info & LIBWIFI_PAIRWISE_CIPHER_SUITE_CCMP256)
-			m_pairSuite = CIPHER_SUITE_CCMP256;
-		else if (bss->encryption_info & LIBWIFI_PAIRWISE_CIPHER_SUITE_GCMP128)
-			m_pairSuite = CIPHER_SUITE_GCMP128;
-		else if (bss->encryption_info & LIBWIFI_PAIRWISE_CIPHER_SUITE_CCMP128)
-			m_pairSuite = CIPHER_SUITE_CCMP128;
-		else
-			throw std::runtime_error("Chosen suite is not supported. connection will be dropped");
 
 		//akm suite selection
 		if (bss->encryption_info & LIBWIFI_AKM_PSK_SHA384)
@@ -397,60 +427,18 @@ void ConnectionHandler::setSecurity(const libwifi_bss* bss)
 	else
 		throw std::runtime_error("Chosen security is unsecure. connection will be dropped");
 
+	//pairwise suite selection
+	if (bss->encryption_info & LIBWIFI_PAIRWISE_CIPHER_SUITE_GCMP256)
+		m_pairSuite = CIPHER_SUITE_GCMP256;
+	else if (bss->encryption_info & LIBWIFI_PAIRWISE_CIPHER_SUITE_CCMP256)
+		m_pairSuite = CIPHER_SUITE_CCMP256;
+	else if (bss->encryption_info & LIBWIFI_PAIRWISE_CIPHER_SUITE_GCMP128)
+		m_pairSuite = CIPHER_SUITE_GCMP128;
+	else if (bss->encryption_info & LIBWIFI_PAIRWISE_CIPHER_SUITE_CCMP128)
+		m_pairSuite = CIPHER_SUITE_CCMP128;
+	else
+		throw std::runtime_error("Chosen suite is not supported. connection will be dropped");
+
 	m_rsnTag[GROUP_SUITE_INDEX] = bss->rsn_info.group_cipher_suite.suite_type;
 	m_rsnTag[AKM_TYPE_INDEX] = m_akmSuite;
-}
-
-void ConnectionHandler::sendPacket(std::vector<uint8_t> &packet) const
-{
-	Helper::addRadioTap(packet, m_channel);
-	if (pcap_sendpacket(m_adapterHandler.getDeviceHandle(), packet.data(), packet.size()) != 0)
-		throw std::runtime_error("Cannot reach the specified network");
-}
-
-uint8_t ConnectionHandler::receivePacket(libwifi_frame *frame)
-{
-	uint8_t status = 0;
-	pcap_pkthdr* header = {0};
-	const u_char* rawResponse = nullptr;
-	uint8_t counter = 0;
-	getPacket:
-		status = pcap_next_ex(m_adapterHandler.getDeviceHandle(), &header, &rawResponse);
-	if (status == PCAP_ERROR)
-		throw std::runtime_error(pcap_geterr(AdapterHandler::getInstance().getDeviceHandle()));
-	if (counter == MAX_TIMEOUTS)
-		return -1;
-	if (status == 0) //timeout
-	{
-		goto getPacket;
-		counter++;
-	}
-	if (libwifi_get_wifi_frame(frame, rawResponse, header->caplen, IS_RADIOTAP) != 0)
-		throw std::runtime_error("cannot parse the frame");
-	//because of the filter that will be put on after the beacon parse only packets that are ment for this device will be parsed so we need to ignore the requests and acks
-	uint8_t type = frame->frame_control.type;
-	uint8_t subtype = frame->frame_control.subtype;
-	if (type != TYPE_CONTROL)
-	{
-		uint8_t* receiver = nullptr;
-		uint8_t* destination = nullptr;
-
-		if (type == TYPE_DATA && subtype != SUBTYPE_DATA_NULL && subtype != SUBTYPE_DATA_QOS_NULL) {
-			receiver = frame->header.data.addr2;
-			destination = frame->header.data.addr1;
-		}
-		else if (type == TYPE_MANAGEMENT) {
-			if (subtype == SUBTYPE_AUTH  || subtype == SUBTYPE_ASSOC_RESP ||
-				subtype == SUBTYPE_REASSOC_RESP || subtype == SUBTYPE_ACTION || subtype == SUBTYPE_PROBE_RESP) {
-				receiver = frame->header.mgmt_unordered.addr2;
-				destination = frame->header.mgmt_unordered.addr1;
-				}
-		}
-
-		if (receiver != nullptr && destination != nullptr &&
-			memcmp(destination, m_adapterHandler.getDeviceMac(), MAC_SIZE_BYTES) == 0)
-			sendAck(receiver);
-	}
-
-	return 0;
 }
