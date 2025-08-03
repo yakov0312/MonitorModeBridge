@@ -129,8 +129,9 @@ void EncryptionHelper::setMic(EapolFrame &eapol, const uint8_t *ptk, int akmSuit
 	uint8_t micOutput[EVP_MAX_MD_SIZE];
 
 	uint8_t* startOffset = (uint8_t*)&eapol.eapolHeader;
+
 	// Calculate HMAC over the whole m2WpaData struct
-	if (!HMAC(md, kck, KCK_SIZE, startOffset, sizeof(EAPOLHeader) + sizeof(WPA2KeyDesc) + RSN_INFO_SIZE, micOutput, &micLen))
+	if (!HMAC(md, kck, KCK_SIZE, startOffset, sizeof(EAPOLHeader) + sizeof(WPA2KeyDesc), micOutput, &micLen))
 		throw std::runtime_error("HMAC calculation failed");
 	memcpy(eapol.keyDesc.mic, micOutput, MIC_SIZE);
 }

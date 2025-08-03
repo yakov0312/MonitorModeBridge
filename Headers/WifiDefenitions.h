@@ -3,7 +3,12 @@
 #include <netinet/in.h>
 
 #include "string"
+extern "C"
+{
+	#include "libwifi/core/frame/tag.h"
+}
 
+constexpr size_t MAX_PACKET_SIZE = 4096;
 
 //ap related
 constexpr uint8_t MAC_SIZE_BYTES = 6;
@@ -50,7 +55,7 @@ constexpr uint8_t PMK_SIZE_256 = 32;
 constexpr uint8_t NONCE_SIZE = 32;
 constexpr uint8_t PTK_DATA_SIZE = 76;
 constexpr size_t PTK_SIZE = 64;
-constexpr uint8_t MIC_SIZE = 32;
+constexpr uint8_t MIC_SIZE = 16;
 constexpr uint8_t KCK_SIZE = 16;
 constexpr uint8_t GTK_SIZE = 56;
 constexpr uint8_t IV_SIZE = 16;
@@ -102,7 +107,8 @@ struct AckPacket
 	uint32_t fcs; //layer calculated
 } __attribute__((packed));
 
-struct IeeeHeader {
+struct IeeeHeader
+{
 	uint16_t frameControl = EAPOL_FRAME_CONTROL;
 	uint16_t duration = 0;
 	uint8_t  addr1[MAC_SIZE_BYTES];        // DA = AP MAC
@@ -111,7 +117,8 @@ struct IeeeHeader {
 	uint16_t seqControl = EAPOL_SEC_CTRL;
 } __attribute__((packed));
 
-struct LLCHeader {
+struct LLCHeader
+{
 	uint8_t  dsap = LLC_SAP;
 	uint8_t  ssap = LLC_SAP;
 	uint8_t  control = LLC_CONTROL;
@@ -119,24 +126,29 @@ struct LLCHeader {
 	uint16_t etherType = LLC_ETHER_TYPE;
 } __attribute__((packed));
 
-struct WPA2KeyDesc {
+struct WPA2KeyDesc
+{
 	uint8_t  descriptorType = WPA2_Key_Descriptor;  // 2
 	uint16_t keyInfo;         // flags + AKM bits (BE)
-	uint16_t keyLength;       // cipher key len (BE)
+	uint16_t keyLength = 0;       // cipher key len (BE)
 	uint64_t replayCounter;   // from M1/M3 (BE)
 	uint8_t  nonce[NONCE_SIZE] = {0};       // SNonce for M2
 	uint8_t  iv[IV_SIZE] = {0};          // zero
 	uint64_t rsc = 0;             // zero
 	uint64_t id = 0;              // zero
 	uint8_t  mic[MIC_SIZE] = {0};         // HMAC output
-	uint16_t keyDataLength = 0;   // len of RSN IE (BE) + id + length
+	uint16_t keyDataLength = htons(RSN_INFO_SIZE + 2);    // len of RSN IE (BE) + id + length
+	uint8_t tagNumber = TAG_RSN;
+	uint8_t tagLength = RSN_INFO_SIZE;
+	uint8_t keyData[RSN_INFO_SIZE] = {0};
 } __attribute__((packed));
 
 // EAPOL header
-struct EAPOLHeader {
+struct EAPOLHeader
+{
 	uint8_t  version = EAPOL_VERSION;
 	uint8_t  type = EAPOL_KEY_INFO;
-	uint16_t length = htons(sizeof(WPA2KeyDesc));
+	uint16_t length = htons(sizeof(WPA2KeyDesc));;
 } __attribute__((packed));
 
 struct EapolFrame {

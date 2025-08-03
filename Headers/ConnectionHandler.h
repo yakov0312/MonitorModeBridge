@@ -4,7 +4,6 @@
 #pragma once
 
 #include <vector>
-#include <pcap/pcap.h>
 
 #include "WifiDefenitions.h"
 #include "AdapterHandler.h"
@@ -51,7 +50,6 @@ private:
 	std::string m_ssid;
 
 	AdapterHandler& m_adapterHandler;
-	pcap_t* m_deviceHandle;
 
 	//ap
 	std::string m_password;

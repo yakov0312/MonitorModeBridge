@@ -48,20 +48,21 @@ public:
 	static uint8_t getChannel();
 private:
 
-	static void addPackets(u_char* user, const pcap_pkthdr* header, const u_char* packet);
+	void parsePackets(const u_char* packet, size_t size);
 
 	//channel related
 	void setChannel() const;
 	static uint8_t m_channel;
 
 	bool m_isSniffing;
+	std::thread m_sniffer;
 
 	std::condition_variable m_cv;
 	std::mutex m_mutex;
 	std::queue<libwifi_frame> m_packets;
 
 	AdapterHandler& m_adapterHandler;
-	pcap_t* m_device;
+	int m_socket;
 	const uint8_t* m_deviceMac;
 
 	std::vector<uint8_t> m_apAck;

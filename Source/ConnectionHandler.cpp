@@ -19,8 +19,7 @@ extern "C" {
 #include <iomanip> //for debug
 
 
-ConnectionHandler::ConnectionHandler() : m_adapterHandler(AdapterHandler::getInstance()),
-	m_deviceHandle(m_adapterHandler.getDeviceHandle()), m_aid(0), m_akmSuite(0),
+ConnectionHandler::ConnectionHandler() : m_adapterHandler(AdapterHandler::getInstance()), m_aid(0), m_akmSuite(0),
 	m_bssid{0}, m_groupSuite(0), m_pairSuite(0), m_password(""), m_rsnTag(0), m_securityType(0),
 	m_ssid(""), m_deviceMac(m_adapterHandler.getDeviceMac()), m_gtkKey{}, m_packetHandler()
 {
@@ -250,7 +249,7 @@ void ConnectionHandler::performHandshakeNonSAE()
 {
 	std::optional<libwifi_frame> frame;
 	libwifi_frame* framePtr = nullptr;
-	for (int i =0; i<= MAX_EAPOL_RECEIVE; i++)
+	for (int i = 0; i <= MAX_EAPOL_RECEIVE; i++)
 	{
 		frame = getHandshakePacketNonSAE();
 		if (frame.has_value())
@@ -296,9 +295,10 @@ void ConnectionHandler::performHandshakeNonSAE()
 	eapol.keyDesc.keyInfo = htons(INFORMATION_FLAG_M4);
 	eapol.keyDesc.replayCounter = wpaData.key_info.replay_counter;
 	EncryptionHelper::setMic(eapol, ptk.data(), m_akmSuite);
-	if (pcap_sendpacket(m_deviceHandle, reinterpret_cast<const u_char*>(&eapol), sizeof(eapol)) == PCAP_ERROR)
-		throw std::runtime_error("Failed to send m4");
+	std::vector<uint8_t> m4((uint8_t*)&eapol, (uint8_t*)&eapol + sizeof(EapolFrame));
+	m_packetHandler.sendPacket(m4);
 	//handshake finished(no SAE)
+	std::cout << "finished eapol" << std::endl;
 }
 
 void ConnectionHandler::performHandshakeSAE()
@@ -324,7 +324,7 @@ std::pair<EapolFrame, std::vector<uint8_t>> ConnectionHandler::createM2(const li
 	//construct the m2
 	EapolFrame eapol {
 		.keyDesc = {
-			.replayCounter = wpaData.key_info.replay_counter,
+			.replayCounter = htobe64(wpaData.key_info.replay_counter),
 		}
 	};
 	uint16_t keyInfo = INFORMATION_FLAG_M2;
@@ -336,22 +336,11 @@ std::pair<EapolFrame, std::vector<uint8_t>> ConnectionHandler::createM2(const li
 		default: throw std::runtime_error("Invalid akm suite");
 	}
 
-	uint16_t keyLen = 0;
-	switch (m_pairSuite) {
-		case CIPHER_SUITE_CCMP128: keyLen = htons(16); break;
-		case CIPHER_SUITE_CCMP256: keyLen = htons(32); break;
-		case CIPHER_SUITE_GCMP128: keyLen = htons(16); break;
-		case CIPHER_SUITE_GCMP256: keyLen = htons(32); break;
-		default:
-			throw std::runtime_error("Unsupported pairwise cipher suite for WPA2");
-	}
-
-	eapol.keyDesc.keyLength = keyLen;
-	eapol.keyDesc.keyInfo= htons(keyInfo);
+	eapol.keyDesc.keyInfo = htons(keyInfo);
 
 	memcpy(eapol.keyDesc.nonce, sNonce, NONCE_SIZE);
+	memcpy(eapol.keyDesc.keyData, m_rsnTag, RSN_INFO_SIZE);
 	EncryptionHelper::setMic(eapol, ptk, m_akmSuite);
-
 	return {eapol, std::vector<uint8_t>(ptk, ptk + PTK_SIZE)};
 }
 
@@ -365,7 +354,7 @@ std::optional<libwifi_frame> ConnectionHandler::getHandshakePacketNonSAE()
 {
 	libwifi_frame* framePtr = nullptr;
 	std::optional<libwifi_frame> frame;
-	while (!m_packetHandler.waitForPacket(MAX_WAITING_TIME))
+	while (m_packetHandler.waitForPacket(MAX_WAITING_TIME))
 	{
 		frame = m_packetHandler.getPacket();
 		if (!frame.has_value())

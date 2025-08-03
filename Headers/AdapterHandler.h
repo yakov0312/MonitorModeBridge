@@ -1,7 +1,6 @@
 #pragma once
 #include <string>
 
-#include "pcap.h"
 #include "WifiDefenitions.h"
 
 class AdapterHandler
@@ -11,42 +10,39 @@ public:
 	static AdapterHandler& getInstance();
 
 	//error related
-	void checkErr() const;
 	void resolveErrors();
 
 	void setFilters();
-	void removeFilters();
 
 	//helper
-	static u_char* getMacOffset(uint64_t* mac);
 	static void setDeviceToManaged();
 	static void setDeviceToManaged(int sig);
 
 	//getters
-	[[nodiscard]] bool getErr() const;
-	[[nodiscard]] pcap_if_t* getDevice() const;
-	[[nodiscard]] pcap_t* getDeviceHandle() const;
 	[[nodiscard]] const uint8_t* getDeviceMac() const;
 	[[nodiscard]] std::string getDeviceName() const;
-
+	[[nodiscard]] int getSocket() const;
 
 private:
 	AdapterHandler();
 
 	//initialize
-	bool initDevice();
-	bool initDeviceNetwork();
+	void initDevice();
+	void initDeviceNetwork();
 
 	//instance
 	static AdapterHandler m_instance;
 
+	//helpers
+	static std::string findWirelessInterface();
+	void closeSocket();
+	void openRawSocket();
+	static int getInterfaceIndex(const std::string& iface);
+	static bool isMonitorMode(const std::string& iface);
+
 	//device
-	pcap_if_t* m_device;
-	pcap_t* m_deviceHandle;
+	int m_socket;
 	uint8_t m_deviceMac[MAC_SIZE_BYTES];
 	std::string m_deviceName;
-
-	//flags
-	bool m_errFlag;
 
 };
