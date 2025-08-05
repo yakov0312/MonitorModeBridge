@@ -3,7 +3,6 @@
 //
 #include "WifiDefenitions.h"
 
-bool IS_RADIOTAP = false; //will be set later on
 
 uint8_t RSN_WPA2[] =
 {

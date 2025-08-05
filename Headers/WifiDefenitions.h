@@ -37,7 +37,7 @@ constexpr uint8_t ASSOC_SUCCESS = 0;
 constexpr uint8_t PROBE_COUNT = 2;
 
 //libwifi related
-extern bool IS_RADIOTAP;
+constexpr bool IS_RADIOTAP = true;
 constexpr uint8_t LIBWIFI_SUCCESS = 0;
 
 //LLC related

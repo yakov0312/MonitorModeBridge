@@ -178,7 +178,7 @@ void AdapterHandler::setFilters()
              m_deviceMac[3], m_deviceMac[4], m_deviceMac[5]);
     std::string macStr = buf;
 
-    std::string filterExp = "wlan addr1 " + macStr + " and not ((wlan[0] & 0x0C) == 0x04)";
+    std::string filterExp = "wlan addr1 " + macStr + " and (wlan[0] & 0x0C) != 0x04";
 
     // Initialize a dummy pcap handle for compilation
     pcap_t* pcap_handle = pcap_open_dead(DLT_IEEE802_11_RADIO, 65535);

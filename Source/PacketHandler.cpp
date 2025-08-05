@@ -144,7 +144,7 @@ void PacketHandler::parsePackets(const u_char* packet, size_t size)
 void PacketHandler::sendPacket(std::vector<uint8_t>& packet) const
 {
 	PacketHandler::addRadioTap(packet);
-	if (send(m_socket, packet.data(), packet.size(), 0) < 0)
+	if (send(m_socket, packet.data(), packet.size(), 0) <= 0)
 		throw std::runtime_error("Cannot reach the specified network");
 }
 
