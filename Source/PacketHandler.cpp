@@ -1,6 +1,4 @@
-//
 // Created by yakov on 8/1/25.
-//
 
 #include "PacketHandler.h"
 
@@ -12,35 +10,37 @@
 
 extern "C"
 {
-	#include "libwifi/core/frame/crc.h"
-	#include "libwifi/core/radiotap/radiotap.h"
-	#include "libwifi/gen/misc/radiotap.h"
+	#include <libwifi/core/frame/crc.h>
+	#include <libwifi/core/radiotap/radiotap.h>
+	#include <libwifi/gen/misc/radiotap.h>
 }
 
 constexpr uint8_t RADIOTAP_HEADER_MIN_LENGTH = 12;
 constexpr uint8_t CHANNEL_FREQ_OFFSET = 8;
 constexpr uint8_t CHANNEL_FLAGS_OFFSET = 10;
 
-uint8_t PacketHandler::m_channel = 0; //no one will be able to use anything so the value here does not really matter
+uint8_t PacketHandler::m_channel = 0; // No one will be able to use anything so the value here does not really matter
 
-PacketHandler::PacketHandler() : m_adapterHandler(AdapterHandler::getInstance()),
-	m_isSniffing(false), m_socket(m_adapterHandler.getSocket()) , m_mutex(), m_cv(), m_packets(), m_deviceMac(m_adapterHandler.getDeviceMac())
+PacketHandler::PacketHandler() :
+	m_isSniffing(false), m_adapterHandler(AdapterHandler::getInstance()),
+	m_socket(m_adapterHandler.getSocket()), m_deviceMac(m_adapterHandler.getDeviceMac()),
+	m_apMac{}
 {
 }
 
-PacketHandler::PacketHandler(uint8_t channel, const uint8_t* apMac) :
-	m_adapterHandler(AdapterHandler::getInstance()), m_isSniffing(false),
-	m_socket(m_adapterHandler.getSocket()), m_mutex(), m_cv(), m_packets(),
-	m_apAck(createAck(apMac)), m_deviceMac(m_adapterHandler.getDeviceMac())
+PacketHandler::PacketHandler(const uint8_t channel, const uint8_t* apMac) :
+	m_isSniffing(false), m_adapterHandler(AdapterHandler::getInstance()),
+	m_socket(m_adapterHandler.getSocket()),
+	m_deviceMac(m_adapterHandler.getDeviceMac()), m_apAck(createAck(apMac))
 {
 	memcpy(m_apMac, apMac, MAC_SIZE_BYTES);
 	setChannel(channel);
 	addRadioTap(m_apAck);
 }
 
-bool PacketHandler::waitForPacket(uint16_t timeout)
+bool PacketHandler::waitForPacket(const uint16_t timeout)
 {
-	std::unique_lock<std::mutex> lock(m_mutex);
+	std::unique_lock lock(m_mutex);
 
 	return m_cv.wait_for(lock, std::chrono::milliseconds(timeout), [this] {
 		return !m_packets.empty();
@@ -54,8 +54,9 @@ void PacketHandler::toggleSniffing()
 		m_isSniffing = true;
 		auto startLoop = [this]()
 		{
-			pthread_t tid = pthread_self();
-			struct sched_param sch = { .sched_priority = 98 };
+			const pthread_t tid = pthread_self();
+			constexpr struct sched_param sch = { .sched_priority = 98 };
+
 			if (pthread_setschedparam(tid, SCHED_FIFO, &sch) != 0)
 				throw std::runtime_error("Failed to set thread to real-time priority");
 
@@ -63,7 +64,7 @@ void PacketHandler::toggleSniffing()
 
 			while (m_isSniffing)
 			{
-				ssize_t len = recv(m_socket, buffer, MAX_PACKET_SIZE, 0);
+				const ssize_t len = recv(m_socket, buffer, MAX_PACKET_SIZE, 0);
 				if (len < 0)
 				{
 					if (errno == EINTR) continue;  // Interrupted by signal
@@ -79,20 +80,22 @@ void PacketHandler::toggleSniffing()
 		m_sniffer = std::thread(startLoop);
 		return;
 	}
+
 	m_isSniffing = false;
 	m_sniffer.join();
-	emptyQueue(); // delete the remaining packets
+	emptyQueue(); // Delete the remaining packets
 }
 
 std::optional<libwifi_frame> PacketHandler::getPacket()
 {
-	std::lock_guard<std::mutex> lock(m_mutex);
+	std::lock_guard lock(m_mutex);
 	if (!m_packets.empty())
 	{
 		libwifi_frame frame = m_packets.front();
 		m_packets.pop();
 		return frame;
 	}
+
 	return std::nullopt;
 }
 
@@ -108,18 +111,18 @@ void PacketHandler::setChannel() const
 
 	if (ioctl(sock, SIOCSIWFREQ, &wrq) != 0)
 		throw std::runtime_error("Can't set channel. channel: " + std::to_string(m_channel));
+
 	close(sock);
 }
 
-void PacketHandler::parsePackets(const u_char* packet, size_t size)
+void PacketHandler::parsePackets(const u_char* packet, const size_t size)
 {
-	uint8_t status = 0;
 	libwifi_frame frame;
 
 	if (libwifi_get_wifi_frame(&frame, packet, size, IS_RADIOTAP) != 0)
 		return;
 
-	const uint8_t* receiver = this->getReceiver(&frame); //this ensure the packet was not broadcasted
+	const uint8_t* receiver = this->getReceiver(&frame); // This ensures the packet was not broadcasted
 	if (receiver != nullptr && memcmp(receiver, this->m_apMac, MAC_SIZE_BYTES) == 0)
 	{
 		this->sendAck();
@@ -134,42 +137,43 @@ void PacketHandler::parsePackets(const u_char* packet, size_t size)
 
 	if (frame.frame_control.type == TYPE_DATA &&
 		(frame.frame_control.subtype == SUBTYPE_DATA_NULL || frame.frame_control.subtype == SUBTYPE_DATA_QOS_NULL))
-		return; //we dont want to store it
+		return; // We dont want to store it
 
-	std::lock_guard<std::mutex> lock(this->m_mutex);
-	this->m_packets.push(frame); //we dont free it since there is a ptr inside the frame
+	std::lock_guard lock(this->m_mutex);
+	this->m_packets.push(frame); // We don't free it since there is a ptr inside the frame
 	this->m_cv.notify_all();
 }
 
 void PacketHandler::sendPacket(std::vector<uint8_t>& packet) const
 {
-	PacketHandler::addRadioTap(packet);
+	addRadioTap(packet);
 	if (send(m_socket, packet.data(), packet.size(), 0) <= 0)
 		throw std::runtime_error("Cannot reach the specified network");
 }
 
 void PacketHandler::emptyQueue()
 {
-	std::lock_guard<std::mutex> lock(m_mutex);
+	std::lock_guard lock(m_mutex);
 	while (!m_packets.empty())
 		m_packets.pop();
 }
 
-void PacketHandler::addRadioTap(std::vector<uint8_t> &packet) const
+void PacketHandler::addRadioTap(std::vector<uint8_t> &packet)
 {
 	// Check if packet already has radiotap header:
 	// Radiotap header starts with version = 0
 	// and length stored in bytes 2 and 3 (little endian)
-	if (packet.size() >= 4 && *(uint16_t*)&packet[0] == 0x00 && *(uint16_t*)&packet[2] < packet.size()
-		&& *(uint16_t*)&packet[2] != 0)
+
+	if (packet.size() >= 4 && *reinterpret_cast<uint16_t*>(&packet[0]) == 0x00 && *reinterpret_cast<uint16_t*>(&packet[2]) < packet.size()
+		&& *reinterpret_cast<uint16_t*>(&packet[2]) != 0)
 	{
-		uint16_t newFreq = 2412 + 5 * (m_channel - 1);
-		uint16_t* freq = reinterpret_cast<uint16_t*>(&packet[CHANNEL_FREQ_OFFSET]);
+		const uint16_t newFreq = 2412 + 5 * (m_channel - 1);
+		const auto freq = reinterpret_cast<uint16_t*>(&packet[CHANNEL_FREQ_OFFSET]);
 		*freq = newFreq; //you cannot change the channel without setting him so no need to do it
 		return;
 	}
 
-	libwifi_radiotap_info info = {0};
+	libwifi_radiotap_info info = {};
 
 	info.present = (1 << IEEE80211_RADIOTAP_FLAGS) | (1 << IEEE80211_RADIOTAP_CHANNEL);
 
@@ -178,7 +182,7 @@ void PacketHandler::addRadioTap(std::vector<uint8_t> &packet) const
 	info.channel.flags = 0x00a0;
 
 	char radiotapHeader[LIBWIFI_MAX_RADIOTAP_LEN] = {0};
-	uint8_t rtapLen = libwifi_create_radiotap(&info, radiotapHeader);
+	const uint8_t rtapLen = libwifi_create_radiotap(&info, radiotapHeader);
 
 	radiotapHeader[2] = rtapLen & 0xff; // write length in little endian
 	radiotapHeader[3] = (rtapLen >> 8) & 0xff;
@@ -200,9 +204,9 @@ std::vector<uint8_t> PacketHandler::createAck(const uint8_t* receiver)
 	AckPacket ack;
 	memcpy(ack.receiver, receiver, MAC_SIZE_BYTES);
 
-	std::vector<uint8_t> ackData(reinterpret_cast<uint8_t*>(&ack), reinterpret_cast<uint8_t*>(&ack) + sizeof(AckPacket) - sizeof(uint32_t));
+	std::vector ackData(reinterpret_cast<uint8_t*>(&ack), reinterpret_cast<uint8_t*>(&ack) + sizeof(AckPacket) - sizeof(uint32_t));
 
-	uint32_t fcs = libwifi_crc32(ackData.data(), ackData.size());
+	const uint32_t fcs = libwifi_crc32(ackData.data(), ackData.size());
 	// Append FCS in little-endian
 	ackData.push_back(fcs & 0xFF);
 	ackData.push_back((fcs >> 8) & 0xFF);
@@ -212,20 +216,22 @@ std::vector<uint8_t> PacketHandler::createAck(const uint8_t* receiver)
 	return ackData;
 }
 
-const uint8_t* PacketHandler::getReceiver(const libwifi_frame* frame)
+const uint8_t* PacketHandler::getReceiver(const libwifi_frame* frame) const
 {
-	uint8_t type = frame->frame_control.type;
+	const uint8_t type = frame->frame_control.type;
 	if (type == TYPE_CONTROL)
 		return nullptr;
 
 	const uint8_t* receiver = nullptr;
 	const uint8_t* destination = nullptr;
 
-	if (type == TYPE_DATA) {
+	if (type == TYPE_DATA)
+	{
 		receiver = frame->header.data.addr2;
 		destination = frame->header.data.addr1;
 	}
-	else if (type == TYPE_MANAGEMENT){
+	else if (type == TYPE_MANAGEMENT)
+	{
 		receiver = frame->header.mgmt_unordered.addr2;
 		destination = frame->header.mgmt_unordered.addr1;
 	}
@@ -233,17 +239,18 @@ const uint8_t* PacketHandler::getReceiver(const libwifi_frame* frame)
 	if (!(receiver != nullptr && destination != nullptr &&
 		memcmp(destination, m_deviceMac, MAC_SIZE_BYTES) == 0))
 		return nullptr;
+
 	return receiver;
 }
 
-void PacketHandler::changeMacAp(const uint8_t *apMAc)
+void PacketHandler::changeMacAp(const uint8_t* apMAc)
 {
 	memcpy(m_apMac, apMAc, MAC_SIZE_BYTES);
 	m_apAck = std::move(createAck(m_apMac)); //since the ap has changed the ack should too
 	addRadioTap(m_apAck);
 }
 
-void PacketHandler::setChannel(uint8_t channel) const
+void PacketHandler::setChannel(const uint8_t channel) const
 {
 	if (channel != m_channel)
 	{

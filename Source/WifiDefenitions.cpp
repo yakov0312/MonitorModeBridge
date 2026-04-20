@@ -1,8 +1,6 @@
-//
 // Created by yakov on 6/17/25.
-//
-#include "WifiDefenitions.h"
 
+#include "WifiDefenitions.h"
 
 uint8_t RSN_WPA2[] =
 {

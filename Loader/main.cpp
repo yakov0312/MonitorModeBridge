@@ -9,7 +9,7 @@ int main()
 {
 	try
 	{
-		manager.connectToNetwork(BasicNetworkInfo("Dudnik", "054642400"));
+		manager.connectToNetwork(BasicNetworkInfo("Dudnik", "051642410"));
 	}
 	catch(const std::exception& e)
 	{

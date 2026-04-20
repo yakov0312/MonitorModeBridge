@@ -1,17 +1,11 @@
-//
 // Created by yakov on 6/16/25.
-//
 
 #pragma once
-#include <functional>
-#include <pcap/pcap.h>
 
 #include "AdapterHandler.h"
 #include "WifiDefenitions.h"
 
-extern "C" {
-#include "libwifi/core/frame/frame.h"
-}
+#include <pcap/pcap.h>
 
 enum PacketStatus
 {
@@ -25,7 +19,7 @@ class EncryptionHelper
 {
 public:
 
-	//encryption related
+	// Encryption related
 	static void getPmk(const std::string& password, uint8_t suite, const std::string& ssid, uint8_t* pmk);
 	static void getPtkData(uint8_t* data, const uint8_t* nonce1, const uint8_t* nonce2, const uint8_t* mac1);
 	static void getPtk(uint8_t* ptk, const uint8_t* pmk, const uint8_t* data, uint8_t suite);

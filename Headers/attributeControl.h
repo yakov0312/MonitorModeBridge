@@ -1,6 +1,4 @@
-//
 // Created by yakov on 6/12/25.
-//
 
 #pragma once
 
