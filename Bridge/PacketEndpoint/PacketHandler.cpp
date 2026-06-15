@@ -16,22 +16,21 @@ extern "C"
 }
 
 constexpr uint8_t RADIOTAP_HEADER_MIN_LENGTH = 12;
-constexpr uint8_t CHANNEL_FREQ_OFFSET = 8;
-constexpr uint8_t CHANNEL_FLAGS_OFFSET = 10;
+constexpr uint8_t CHANNEL_FREQ_OFFSET = 10;
 
 uint8_t PacketHandler::m_channel = 0; // No one will be able to use anything so the value here does not really matter
 
 PacketHandler::PacketHandler() :
-	m_isSniffing(false), m_adapterHandler(AdapterHandler::getInstance()),
-	m_socket(m_adapterHandler.getSocket()), m_deviceMac(m_adapterHandler.getDeviceMac()),
+	m_isSniffing(false), m_interfaceHandler(InterfaceHandler::getInstance()),
+	m_socket(m_interfaceHandler.getSocket()), m_deviceMac(m_interfaceHandler.getInterfaceMac()),
 	m_apMac{}
 {
 }
 
 PacketHandler::PacketHandler(const uint8_t channel, const uint8_t* apMac) :
-	m_isSniffing(false), m_adapterHandler(AdapterHandler::getInstance()),
-	m_socket(m_adapterHandler.getSocket()),
-	m_deviceMac(m_adapterHandler.getDeviceMac()), m_apAck(createAck(apMac))
+	m_isSniffing(false), m_interfaceHandler(InterfaceHandler::getInstance()),
+	m_socket(m_interfaceHandler.getSocket()),
+	m_deviceMac(m_interfaceHandler.getInterfaceMac()), m_apAck(createAck(apMac))
 {
 	memcpy(m_apMac, apMac, MAC_SIZE_BYTES);
 	setChannel(channel);
@@ -68,7 +67,8 @@ void PacketHandler::toggleSniffing()
 				if (len < 0)
 				{
 					if (errno == EINTR) continue;  // Interrupted by signal
-					std::cerr << "recv failed" << std::endl;
+					std::cerr << "Recv failed with code " << errno << std::endl;
+					m_isSniffing = false;
 					break;
 				}
 
@@ -105,7 +105,7 @@ void PacketHandler::setChannel() const
 	if (sock < 0) throw std::runtime_error("Cannot init socket");
 
 	iwreq wrq = {0};
-	strncpy(wrq.ifr_name, m_adapterHandler.getDeviceName().data(), IFNAMSIZ);
+	strncpy(wrq.ifr_name, m_interfaceHandler.getInterfaceName().data(), IFNAMSIZ);
 	wrq.u.freq.m = 2412 + 5 * (m_channel - 1);
 	wrq.u.freq.e = 6;
 
@@ -160,12 +160,15 @@ void PacketHandler::emptyQueue()
 
 void PacketHandler::addRadioTap(std::vector<uint8_t> &packet)
 {
+	constexpr uint16_t RADIOTAP_SIZE = 14;
 	// Check if packet already has radiotap header:
 	// Radiotap header starts with version = 0
 	// and length stored in bytes 2 and 3 (little endian)
 
-	if (packet.size() >= 4 && *reinterpret_cast<uint16_t*>(&packet[0]) == 0x00 && *reinterpret_cast<uint16_t*>(&packet[2]) < packet.size()
-		&& *reinterpret_cast<uint16_t*>(&packet[2]) != 0)
+	if (packet.size() >= 4 && // Bounds checking
+		packet[0] == 0x00  && // Version == 0
+		packet[1] == 0x00  && // padding = 0
+ 		*reinterpret_cast<uint16_t*>(&packet[2]) == RADIOTAP_SIZE) // Header size match
 	{
 		const uint16_t newFreq = 2412 + 5 * (m_channel - 1);
 		const auto freq = reinterpret_cast<uint16_t*>(&packet[CHANNEL_FREQ_OFFSET]);

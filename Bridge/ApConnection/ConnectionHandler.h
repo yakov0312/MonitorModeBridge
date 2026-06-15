@@ -2,9 +2,10 @@
 
 #pragma once
 
-#include "AdapterHandler.h"
-#include "PacketHandler.h"
-#include "WifiDefenitions.h"
+#include <Constants/WifiDefenitions.h>
+#include <Encryption/CryptoManager.h>
+#include <Interface/InterfaceHandler.h>
+#include <PacketEndpoint/PacketHandler.h>
 
 #include <vector>
 
@@ -30,10 +31,9 @@ private:
 	void setIp(); // Use dhcp
 
 	// Handshake related
-	std::optional<libwifi_frame> getHandshakePacketNonSAE();
+	libwifi_frame getHandshakePacketNonSAE();
 	void performHandshakeNonSAE();
 	void performHandshakeSAE();
-	std::pair<EapolFrame, std::vector<uint8_t>> createM2(const libwifi_wpa_auth_data& wpaData) const;
 
 	// Helpers
 	void setSecurity(const libwifi_bss* bss);
@@ -44,11 +44,10 @@ private:
 	uint64_t m_groupSuite;
 	uint64_t m_akmSuite;
 	uint64_t m_pairSuite;
-	uint8_t m_gtkKey[GTK_SIZE];
 	uint8_t m_bssid[MAC_SIZE_BYTES];
 	std::string m_ssid;
 
-	AdapterHandler& m_adapterHandler;
+	InterfaceHandler& m_interfaceHandler;
 
 	// AP
 	std::string m_password;
@@ -57,4 +56,5 @@ private:
 	const uint8_t* m_deviceMac;
 
 	PacketHandler m_packetHandler;
+	CryptoManager m_cryptoManager;
 };

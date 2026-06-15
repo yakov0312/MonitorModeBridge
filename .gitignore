@@ -20,17 +20,6 @@ cmake-build-*/
 *.iml
 *.ipr
 
-# Build output and binaries
-out/
-*.o
-*.obj
-*.so
-*.exe
-*.dll
-*.out
-*.a
-*.lib
-
 # Logs and temporary files
 *.log
 *.tmp

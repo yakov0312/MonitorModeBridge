@@ -1,4 +1,4 @@
-#include "AdapterHandler.h"
+#include "InterfaceHandler.h"
 
 // For filters
 #include "pcap.h"
@@ -22,47 +22,46 @@
 
 constexpr uint32_t TIMEOUT = 100;
 
-AdapterHandler AdapterHandler::m_instance = AdapterHandler();
+InterfaceHandler InterfaceHandler::m_instance = InterfaceHandler();
 
-AdapterHandler::AdapterHandler() :  m_deviceMac{}
+InterfaceHandler::InterfaceHandler() :  m_interfaceMac{}
 {
     system("sudo airmon-ng start wlan0 > /dev/null 2>&1"); // Temporary and only for testing later will be using system api
     try
     {
-        initDevice();
-        initDeviceNetwork();
+        initializeInterface();
         setFilters();
     }
     catch (std::exception &e)
     {
         std::cout << e.what() << std::endl;
     }
-    atexit(setDeviceToManaged);
-    signal(SIGINT, setDeviceToManaged);   // Ctrl+C
-    signal(SIGTERM, setDeviceToManaged);  // kill
-    signal(SIGHUP, setDeviceToManaged);
-    signal(SIGSEGV, setDeviceToManaged);
+    atexit(setInterfaceToManaged);
+    signal(SIGINT, setInterfaceToManaged);   // Ctrl+C
+    signal(SIGTERM, setInterfaceToManaged);  // kill
+    signal(SIGHUP, setInterfaceToManaged);
+    signal(SIGSEGV, setInterfaceToManaged);
 }
 
-AdapterHandler::~AdapterHandler()
+InterfaceHandler::~InterfaceHandler()
 {
     closeSocket();
 }
 
-AdapterHandler& AdapterHandler::getInstance()
+InterfaceHandler& InterfaceHandler::getInstance()
 {
     return m_instance;
 }
 
-void AdapterHandler::initDevice()
+void InterfaceHandler::initializeInterface()
 {
-    m_deviceName = findWirelessInterface();
-    if (m_deviceName.empty())
+    m_interfaceName = findWirelessInterface();
+    if (m_interfaceName.empty())
         throw std::runtime_error("No wireless interface found");
 
     openRawSocket();
 
-    const int ifindex = getInterfaceIndex(m_deviceName);
+    const int ifindex = getInterfaceIndex(m_interfaceName);
 
     sockaddr_ll sll = {};
     sll.sll_family = AF_PACKET;
@@ -75,15 +74,12 @@ void AdapterHandler::initDevice()
         throw std::runtime_error("Failed to bind AF_PACKET socket");
     }
 
-    if (!isMonitorMode(m_deviceName))
+    if (!isMonitorMode(m_interfaceName))
     {
         closeSocket();
         throw std::runtime_error("Interface is not in monitor mode");
     }
-}
 
-void AdapterHandler::initDeviceNetwork()
-{
     ifaddrs* addrs = nullptr;
     if (getifaddrs(&addrs) < 0)
         throw std::runtime_error("Failed to get network interfaces");
@@ -93,10 +89,10 @@ void AdapterHandler::initDeviceNetwork()
     {
         if (addr->ifa_addr && addr->ifa_addr->sa_family == AF_PACKET)
         {
-            if (addr->ifa_name && m_deviceName == addr->ifa_name)
+            if (addr->ifa_name && m_interfaceName == addr->ifa_name)
             {
                 const auto* s = reinterpret_cast<sockaddr_ll*>(addr->ifa_addr);
-                memcpy(m_deviceMac, s->sll_addr, 6);
+                memcpy(m_interfaceMac, s->sll_addr, 6);
                 foundMac = true;
             }
         }
@@ -108,7 +104,8 @@ void AdapterHandler::initDeviceNetwork()
         throw std::runtime_error("Cannot find MAC address of device");
 }
 
-std::string AdapterHandler::findWirelessInterface()
+
+std::string InterfaceHandler::findWirelessInterface()
 {
     for (const auto& entry : std::filesystem::directory_iterator("/sys/class/net"))
     {
@@ -120,7 +117,7 @@ std::string AdapterHandler::findWirelessInterface()
     throw std::runtime_error("no wireless interfaces");
 }
 
-void AdapterHandler::closeSocket()
+void InterfaceHandler::closeSocket()
 {
     if (m_socket >= 0)
     {
@@ -129,14 +126,14 @@ void AdapterHandler::closeSocket()
     }
 }
 
-void AdapterHandler::openRawSocket()
+void InterfaceHandler::openRawSocket()
 {
     m_socket = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
     if (m_socket < 0)
         throw std::runtime_error("Failed to create AF_PACKET socket");
 }
 
-int AdapterHandler::getInterfaceIndex(const std::string &iface)
+int InterfaceHandler::getInterfaceIndex(const std::string &iface)
 {
     const int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0)
@@ -155,7 +152,7 @@ int AdapterHandler::getInterfaceIndex(const std::string &iface)
     return ifr.ifr_ifindex;
 }
 
-bool AdapterHandler::isMonitorMode(const std::string &iface)
+bool InterfaceHandler::isMonitorMode(const std::string &iface)
 {
     const int sock = socket(AF_INET, SOCK_DGRAM, 0);
     if (sock < 0)
@@ -175,19 +172,18 @@ bool AdapterHandler::isMonitorMode(const std::string &iface)
     return iwreq.u.mode == IW_MODE_MONITOR;
 }
 
-void AdapterHandler::resolveErrors()
+void InterfaceHandler::resolveErrors()
 {
-    initDevice(); // If it will throw again then abort
-    initDeviceNetwork();
+    initializeInterface(); // If it throws again then abort
     setFilters();
 }
 
-void AdapterHandler::setFilters() const
+void InterfaceHandler::setFilters() const
 {
     char buf[18]; // 6*2 hex + 5 colons + 1 null terminator
     snprintf(buf, sizeof(buf), "%02x:%02x:%02x:%02x:%02x:%02x",
-             m_deviceMac[0], m_deviceMac[1], m_deviceMac[2],
-             m_deviceMac[3], m_deviceMac[4], m_deviceMac[5]);
+             m_interfaceMac[0], m_interfaceMac[1], m_interfaceMac[2],
+             m_interfaceMac[3], m_interfaceMac[4], m_interfaceMac[5]);
     const std::string macStr = buf;
 
     const std::string filterExp = "wlan addr1 " + macStr + " and (wlan[0] & 0x0C) != 0x04";
@@ -220,28 +216,28 @@ void AdapterHandler::setFilters() const
     pcap_close(pcap_handle);
 }
 
-void AdapterHandler::setDeviceToManaged()
+void InterfaceHandler::setInterfaceToManaged()
 {
     system("sudo airmon-ng stop wlan0mon > /dev/null 2>&1"); // Temporary and only for testing later will be using system api
 }
 
-void AdapterHandler::setDeviceToManaged(int sig)
+void InterfaceHandler::setInterfaceToManaged(int sig)
 {
     system("sudo airmon-ng stop wlan0mon > /dev/null 2>&1"); // Temporary and only for testing later will be using system api
 }
 
 
-const uint8_t* AdapterHandler::getDeviceMac() const
+const uint8_t* InterfaceHandler::getInterfaceMac() const
 {
-    return m_deviceMac;
+    return m_interfaceMac;
 }
 
-std::string AdapterHandler::getDeviceName() const
+std::string InterfaceHandler::getInterfaceName() const
 {
-    return m_deviceName;
+    return m_interfaceName;
 }
 
-int AdapterHandler::getSocket() const
+int InterfaceHandler::getSocket() const
 {
     return m_socket;
 }

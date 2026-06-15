@@ -2,7 +2,7 @@
 
 #pragma once
 
-#include "AdapterHandler.h"
+#include "../Interface/InterfaceHandler.h"
 
 #include <condition_variable>
 #include <optional>
@@ -59,7 +59,7 @@ private:
 	std::mutex m_mutex;
 	std::queue<libwifi_frame> m_packets;
 
-	AdapterHandler& m_adapterHandler;
+	InterfaceHandler& m_interfaceHandler;
 	int m_socket;
 	const uint8_t* m_deviceMac;
 
