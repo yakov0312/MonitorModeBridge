@@ -320,6 +320,10 @@ void ConnectionHandler::associateNetwork()
 	libwifi_create_assoc_req(&association, this->m_bssid, m_deviceMac,
 		this->m_bssid, this->m_ssid.c_str(), PacketHandler::getChannel());
 
+	// Only legacy rates, on purpose: without HT/VHT capabilities the AP
+	// treats us as an 802.11a/g station and never sends A-MPDUs. Those would
+	// need a BlockAck from a BA session the firmware knows nothing about;
+	// single frames are covered by the hardware ACK of active monitor.
 	libwifi_quick_add_tag(&association.tags, TAG_SUPP_RATES, m_supportedRates.data(), m_supportedRates.size());
 
 	// Add RSN tag if security is present
