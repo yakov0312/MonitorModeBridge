@@ -8,8 +8,26 @@ In active monitor mode the card **ACKs unicast frames addressed to the monitor
 interface's MAC**. MonitorModeBridge needs this so the AP stops retransmitting
 frames sent to the bridge, instead of relying on ACKs sent from userspace.
 
-> Status: **untested on hardware.** The patch builds cleanly against Linux 7.4
-> and applies to 7.3. Run the tests below and send back the report.
+> Status: **works on hardware** (MSI MAG B850 Tomahawk MAX WiFi II, Fedora 44,
+> kernel 7.3.4-200.fc44, firmware build 20260414). See [Results](#results).
+
+## Results
+
+Tested against a 2.4 GHz AP (channel 5, 2432 MHz), 20 auth exchanges per check:
+
+| Case | RX (60 s) | ACK to monitor MAC | Control (unowned MAC) |
+|---|---|---|---|
+| passive monitor, sniffer mode | OK, ~1200 frames, no stalls | **ACKED**: 1.00 copies, 0 retries | NOT ACKED: 2.7 copies, 43 retries |
+| active monitor, sniffer mode | OK, ~1170 frames, no stalls | **ACKED**: 1.00 copies, 0 retries | NOT ACKED: 3.0 copies, 51 retries |
+| active monitor, `monitor_sniffer=0` | **DEAD** (only own-MAC frames) | ACKED | no replies received |
+
+* The upstream reason for the ban ("RX stops in active monitor") does not
+  happen on MT7927 with this patch.
+* The hardware ACKs unicast frames to the monitor vif MAC, in passive mode
+  too: every monitor vif is a real OMAC on MT7927.
+* Firmware sniffer mode must stay on (`monitor_sniffer=1`, the default).
+  Without it the RX filter behaves like a station and only passes frames
+  for the vif's own MAC.
 
 ## Findings
 

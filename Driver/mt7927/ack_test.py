@@ -118,10 +118,14 @@ def report(replies, rounds):
     print(f"auth replies: {len(replies)} distinct of {rounds} requests")
     print(f"copies per reply: avg {avg:.2f}, max {max(copies)}")
     print(f"replies with Retry bit: {retried}/{len(replies)}")
-    if retried == 0 and avg <= 1.2:
+    # Unacked replies show up as Retry-bit copies, and some APs also restart
+    # the reply with a fresh sequence number, so more distinct replies than
+    # requests is a retransmission signal too.
+    extra = len(replies) > rounds * 1.5
+    if retried == 0 and avg <= 1.2 and not extra:
         print("RESULT: ACKED - the adapter ACKs frames to the monitor MAC")
         return 0
-    if retried >= len(replies) * 0.8:
+    if avg >= 1.5 or extra or retried >= len(replies) * 0.3:
         print("RESULT: NOT ACKED - the AP keeps retransmitting")
         return 1
     print("RESULT: MIXED - some replies retried; check RF conditions and rerun")
