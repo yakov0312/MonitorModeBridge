@@ -5,7 +5,6 @@
 #include <cstring>
 #include <iostream>
 #include <mutex>
-#include <linux/wireless.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 
@@ -102,18 +101,7 @@ std::optional<libwifi_frame> PacketHandler::getPacket()
 
 void PacketHandler::setChannel() const
 {
-	int sock = socket(AF_INET, SOCK_DGRAM, 0);
-	if (sock < 0) throw std::runtime_error("Cannot init socket");
-
-	iwreq wrq = {0};
-	strncpy(wrq.ifr_name, m_interfaceHandler.getInterfaceName().data(), IFNAMSIZ);
-	wrq.u.freq.m = 2412 + 5 * (m_channel - 1);
-	wrq.u.freq.e = 6;
-
-	if (ioctl(sock, SIOCSIWFREQ, &wrq) != 0)
-		throw std::runtime_error("Can't set channel. channel: " + std::to_string(m_channel));
-
-	close(sock);
+	m_interfaceHandler.setFrequency(2412 + 5 * (m_channel - 1));
 }
 
 void PacketHandler::parsePackets(const u_char* packet, const size_t size)

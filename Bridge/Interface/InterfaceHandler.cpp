@@ -4,11 +4,18 @@
 #include "pcap.h"
 
 // For setups
+#include <atomic>
 #include <csignal>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
+#include <fcntl.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 // For sockets
 #include <ifaddrs.h>
@@ -16,19 +23,28 @@
 #include <linux/if.h>
 #include <linux/if_ether.h>
 #include <linux/if_packet.h>
-#include <linux/wireless.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 
-constexpr uint32_t TIMEOUT = 100;
+extern char** environ;
 
-InterfaceHandler InterfaceHandler::m_instance = InterfaceHandler();
+constexpr uint16_t ARPHRD_RADIOTAP_TYPE = 803; // ARPHRD_IEEE80211_RADIOTAP
 
-InterfaceHandler::InterfaceHandler() :  m_interfaceMac{}
+std::string InterfaceHandler::s_managedInterface;
+static std::atomic<bool> s_restored{false};
+
+InterfaceHandler::InterfaceHandler() : m_socket(-1), m_interfaceMac{}, m_hardwareAck(false)
 {
-    system("sudo airmon-ng start wlan0 > /dev/null 2>&1"); // Temporary and only for testing later will be using system api
+    // Register cleanup first so a failure half way still gives the card back
+    atexit(restoreInterface);
+    signal(SIGINT, handleSignal);   // Ctrl+C
+    signal(SIGTERM, handleSignal);  // kill
+    signal(SIGHUP, handleSignal);
+    signal(SIGSEGV, handleSignal);
+
     try
     {
+        createMonitorInterface();
         initializeInterface();
         setFilters();
     }
@@ -36,28 +52,102 @@ InterfaceHandler::InterfaceHandler() :  m_interfaceMac{}
     {
         std::cout << e.what() << std::endl;
     }
-    atexit(setInterfaceToManaged);
-    signal(SIGINT, setInterfaceToManaged);   // Ctrl+C
-    signal(SIGTERM, setInterfaceToManaged);  // kill
-    signal(SIGHUP, setInterfaceToManaged);
-    signal(SIGSEGV, setInterfaceToManaged);
 }
 
 InterfaceHandler::~InterfaceHandler()
 {
     closeSocket();
+    restoreInterface();
 }
 
 InterfaceHandler& InterfaceHandler::getInstance()
 {
-    return m_instance;
+    static InterfaceHandler instance;
+    return instance;
+}
+
+/*
+ * Run a command without a shell. Returns true on exit status 0.
+ * Output is discarded; the bridge prints its own errors.
+ */
+bool InterfaceHandler::runCommand(const std::vector<std::string>& args)
+{
+    std::vector<char*> argv;
+    for (const auto& arg : args)
+        argv.push_back(const_cast<char*>(arg.c_str()));
+    argv.push_back(nullptr);
+
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+    posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+
+    pid_t pid;
+    const int err = posix_spawnp(&pid, argv[0], &actions, nullptr, argv.data(), environ);
+    posix_spawn_file_actions_destroy(&actions);
+    if (err != 0)
+        return false;
+
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0)
+        return false;
+
+    return WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
+
+std::string InterfaceHandler::getPhy(const std::string& iface)
+{
+    const std::filesystem::path link = "/sys/class/net/" + iface + "/phy80211";
+    if (!std::filesystem::exists(link))
+        throw std::runtime_error("Cannot find the wireless phy of " + iface);
+
+    return std::filesystem::read_symlink(link).filename();
+}
+
+/*
+ * Create our own monitor interface on the card's phy:
+ *   iw phy <phy> interface add mmb0 type monitor flags active control otherbss
+ * "active" makes the card ACK frames sent to the interface's MAC in hardware.
+ * Cards/drivers without active monitor support get a plain monitor interface
+ * and the bridge falls back to sending ACKs itself.
+ */
+void InterfaceHandler::createMonitorInterface()
+{
+    // Remove a leftover interface from a previous run
+    if (std::filesystem::exists(std::string("/sys/class/net/") + MONITOR_INTERFACE))
+        runCommand({"iw", "dev", MONITOR_INTERFACE, "del"});
+
+    s_managedInterface = findManagedInterface();
+    const std::string phy = getPhy(s_managedInterface);
+
+    // Take the card away from NetworkManager so it does not fight us
+    runCommand({"nmcli", "device", "set", s_managedInterface, "managed", "no"});
+    runCommand({"ip", "link", "set", s_managedInterface, "down"});
+    s_restored = false;
+
+    m_hardwareAck = runCommand({"iw", "phy", phy, "interface", "add", MONITOR_INTERFACE,
+        "type", "monitor", "flags", "active", "control", "otherbss"});
+
+    if (!m_hardwareAck &&
+        !runCommand({"iw", "phy", phy, "interface", "add", MONITOR_INTERFACE,
+            "type", "monitor", "flags", "control", "otherbss"}))
+        throw std::runtime_error("Failed to create monitor interface on " + phy);
+
+    // For comparing against the old behaviour: MMB_SOFTWARE_ACK=1
+    if (const char* env = std::getenv("MMB_SOFTWARE_ACK"); env && env[0] == '1')
+        m_hardwareAck = false;
+
+    if (!runCommand({"ip", "link", "set", MONITOR_INTERFACE, "up"}))
+        throw std::runtime_error(std::string("Failed to bring up ") + MONITOR_INTERFACE);
+
+    std::cout << "Monitor interface " << MONITOR_INTERFACE << " on " << phy
+              << (m_hardwareAck ? " (active monitor: hardware ACK)"
+                                : " (plain monitor: software ACK)") << std::endl;
 }
 
 void InterfaceHandler::initializeInterface()
 {
-    m_interfaceName = findWirelessInterface();
-    if (m_interfaceName.empty())
-        throw std::runtime_error("No wireless interface found");
+    m_interfaceName = MONITOR_INTERFACE;
 
     openRawSocket();
 
@@ -105,12 +195,15 @@ void InterfaceHandler::initializeInterface()
 }
 
 
-std::string InterfaceHandler::findWirelessInterface()
+std::string InterfaceHandler::findManagedInterface()
 {
     for (const auto& entry : std::filesystem::directory_iterator("/sys/class/net"))
     {
         std::string iface = entry.path().filename();
-        if (std::filesystem::exists("/sys/class/net/" + iface + "/wireless"))
+        if (iface == MONITOR_INTERFACE)
+            continue;
+
+        if (std::filesystem::exists("/sys/class/net/" + iface + "/phy80211") && !isMonitorMode(iface))
             return iface;
     }
 
@@ -152,24 +245,19 @@ int InterfaceHandler::getInterfaceIndex(const std::string &iface)
     return ifr.ifr_ifindex;
 }
 
+/*
+ * Monitor interfaces deliver radiotap frames (link type 803). Wireless
+ * extensions (SIOCGIWMODE) are not available on kernels built without
+ * CONFIG_CFG80211_WEXT, e.g. Fedora.
+ */
 bool InterfaceHandler::isMonitorMode(const std::string &iface)
 {
-    const int sock = socket(AF_INET, SOCK_DGRAM, 0);
-    if (sock < 0)
-        throw std::runtime_error("Failed to open ioctl socket for monitor mode check");
+    std::ifstream typeFile("/sys/class/net/" + iface + "/type");
+    int type = 0;
+    if (!(typeFile >> type))
+        throw std::runtime_error("Failed to get link type of " + iface);
 
-    iwreq iwreq = {};
-    strncpy(iwreq.ifr_name, iface.c_str(), IFNAMSIZ - 1);
-
-    if (ioctl(sock, SIOCGIWMODE, &iwreq) < 0)
-    {
-        close(sock);
-        throw std::runtime_error("Failed to get wireless mode");
-    }
-
-    close(sock);
-
-    return iwreq.u.mode == IW_MODE_MONITOR;
+    return type == ARPHRD_RADIOTAP_TYPE;
 }
 
 void InterfaceHandler::resolveErrors()
@@ -216,16 +304,30 @@ void InterfaceHandler::setFilters() const
     pcap_close(pcap_handle);
 }
 
-void InterfaceHandler::setInterfaceToManaged()
+void InterfaceHandler::setFrequency(const uint32_t mhz) const
 {
-    system("sudo airmon-ng stop wlan0mon > /dev/null 2>&1"); // Temporary and only for testing later will be using system api
+    if (!runCommand({"iw", "dev", m_interfaceName, "set", "freq", std::to_string(mhz)}))
+        throw std::runtime_error("Can't set frequency " + std::to_string(mhz) + " MHz");
 }
 
-void InterfaceHandler::setInterfaceToManaged(int sig)
+void InterfaceHandler::restoreInterface()
 {
-    system("sudo airmon-ng stop wlan0mon > /dev/null 2>&1"); // Temporary and only for testing later will be using system api
+    if (s_managedInterface.empty() || s_restored.exchange(true))
+        return;
+
+    runCommand({"iw", "dev", MONITOR_INTERFACE, "del"});
+    runCommand({"ip", "link", "set", s_managedInterface, "up"});
+    runCommand({"nmcli", "device", "set", s_managedInterface, "managed", "yes"});
 }
 
+void InterfaceHandler::handleSignal(const int sig)
+{
+    restoreInterface();
+    // Default action (terminate / core dump) instead of returning into the
+    // code that crashed or was interrupted.
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
 
 const uint8_t* InterfaceHandler::getInterfaceMac() const
 {
@@ -240,5 +342,10 @@ std::string InterfaceHandler::getInterfaceName() const
 int InterfaceHandler::getSocket() const
 {
     return m_socket;
+}
+
+bool InterfaceHandler::hasHardwareAck() const
+{
+    return m_hardwareAck;
 }
 
