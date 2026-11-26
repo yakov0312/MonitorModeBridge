@@ -42,14 +42,34 @@ void ConnectionHandler::connect(const BasicNetworkInfo& network)
 	this->m_interfaceHandler.setFilters();
 	m_packetHandler.toggleSniffing();
 
-	this->getNetworkInfo();
-	this->authenticateNetwork();
-	this->associateNetwork();
+	try
+	{
+		this->getNetworkInfo();
+		this->authenticateNetwork();
+		this->associateNetwork();
 
-	if (m_securityType != NONE_SECURITY)
-		this->performHandshake();
+		if (m_securityType != NONE_SECURITY)
+			this->performHandshake();
 
-	this->setIp();
+		this->setIp();
+	}
+	catch (...)
+	{
+		printRxStats();
+		throw;
+	}
+
+	printRxStats();
+}
+
+void ConnectionHandler::printRxStats() const
+{
+	const auto [toUs, retries] = m_packetHandler.getRxStats();
+	std::cout << "Frames to us: " << toUs << ", retransmitted by the AP: " << retries;
+	if (toUs > 0)
+		std::cout << " (" << (100 * retries / toUs) << "%)";
+	std::cout << (m_interfaceHandler.hasHardwareAck() ? " [hardware ACK]" : " [software ACK]")
+		<< std::endl;
 }
 
 /*-------------------------------*/

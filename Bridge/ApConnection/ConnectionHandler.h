@@ -32,6 +32,8 @@ private:
 
 	// Handshake related
 	libwifi_frame getHandshakePacketNonSAE();
+
+	void printRxStats() const;
 	void performHandshakeNonSAE();
 	void performHandshakeSAE();
 

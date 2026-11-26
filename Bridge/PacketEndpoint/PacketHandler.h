@@ -4,7 +4,9 @@
 
 #include "../Interface/InterfaceHandler.h"
 
+#include <atomic>
 #include <condition_variable>
+#include <thread>
 #include <optional>
 #include <queue>
 
@@ -45,6 +47,14 @@ public:
 	void setChannel(uint8_t channel) const;
 	static uint8_t getChannel();
 
+	// Frames addressed to us, and how many of them were retransmissions
+	struct RxStats
+	{
+		uint64_t toUs;
+		uint64_t retries;
+	};
+	[[nodiscard]] RxStats getRxStats() const;
+
 private:
 	void parsePackets(const u_char* packet, size_t size);
 
@@ -62,6 +72,10 @@ private:
 	InterfaceHandler& m_interfaceHandler;
 	int m_socket;
 	const uint8_t* m_deviceMac;
+	bool m_hardwareAck;
+
+	std::atomic<uint64_t> m_rxToUs{0};
+	std::atomic<uint64_t> m_rxRetries{0};
 
 	std::vector<uint8_t> m_apAck;
 	uint8_t m_apMac[MAC_SIZE_BYTES];

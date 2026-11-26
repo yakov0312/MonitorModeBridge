@@ -10,7 +10,6 @@
 
 extern "C"
 {
-	#include <libwifi/core/frame/crc.h>
 	#include <libwifi/core/radiotap/radiotap.h>
 	#include <libwifi/gen/misc/radiotap.h>
 }
@@ -23,14 +22,15 @@ uint8_t PacketHandler::m_channel = 0; // No one will be able to use anything so 
 PacketHandler::PacketHandler() :
 	m_isSniffing(false), m_interfaceHandler(InterfaceHandler::getInstance()),
 	m_socket(m_interfaceHandler.getSocket()), m_deviceMac(m_interfaceHandler.getInterfaceMac()),
-	m_apMac{}
+	m_hardwareAck(m_interfaceHandler.hasHardwareAck()), m_apMac{}
 {
 }
 
 PacketHandler::PacketHandler(const uint8_t channel, const uint8_t* apMac) :
 	m_isSniffing(false), m_interfaceHandler(InterfaceHandler::getInstance()),
 	m_socket(m_interfaceHandler.getSocket()),
-	m_deviceMac(m_interfaceHandler.getInterfaceMac()), m_apAck(createAck(apMac))
+	m_deviceMac(m_interfaceHandler.getInterfaceMac()),
+	m_hardwareAck(m_interfaceHandler.hasHardwareAck()), m_apAck(createAck(apMac))
 {
 	memcpy(m_apMac, apMac, MAC_SIZE_BYTES);
 	setChannel(channel);
@@ -112,21 +112,36 @@ void PacketHandler::parsePackets(const u_char* packet, const size_t size)
 		return;
 
 	const uint8_t* receiver = this->getReceiver(&frame); // This ensures the packet was not broadcasted
-	if (receiver != nullptr && memcmp(receiver, this->m_apMac, MAC_SIZE_BYTES) == 0)
+	if (receiver == nullptr)
 	{
-		this->sendAck();
-	}
-	else if (receiver != nullptr)
-	{
-		std::vector<uint8_t> ack = createAck(receiver);
-		this->sendPacket(ack);
-	}
-	else
+		libwifi_free_wifi_frame(&frame);
 		return;
+	}
+
+	m_rxToUs++;
+	if (frame.frame_control.flags.retry)
+		m_rxRetries++; // The sender did not get our ACK for an earlier copy
+
+	// With active monitor the card ACKs within SIFS in hardware. An ACK sent
+	// from userspace arrives milliseconds late and only wastes airtime, so it
+	// is only a fallback for cards without active monitor support.
+	if (!m_hardwareAck)
+	{
+		if (memcmp(receiver, this->m_apMac, MAC_SIZE_BYTES) == 0)
+			this->sendAck();
+		else
+		{
+			std::vector<uint8_t> ack = createAck(receiver);
+			this->sendPacket(ack);
+		}
+	}
 
 	if (frame.frame_control.type == TYPE_DATA &&
 		(frame.frame_control.subtype == SUBTYPE_DATA_NULL || frame.frame_control.subtype == SUBTYPE_DATA_QOS_NULL))
+	{
+		libwifi_free_wifi_frame(&frame);
 		return; // We dont want to store it
+	}
 
 	std::lock_guard lock(this->m_mutex);
 	this->m_packets.push(frame); // We don't free it since there is a ptr inside the frame
@@ -196,16 +211,9 @@ std::vector<uint8_t> PacketHandler::createAck(const uint8_t* receiver)
 	AckPacket ack;
 	memcpy(ack.receiver, receiver, MAC_SIZE_BYTES);
 
-	std::vector ackData(reinterpret_cast<uint8_t*>(&ack), reinterpret_cast<uint8_t*>(&ack) + sizeof(AckPacket) - sizeof(uint32_t));
-
-	const uint32_t fcs = libwifi_crc32(ackData.data(), ackData.size());
-	// Append FCS in little-endian
-	ackData.push_back(fcs & 0xFF);
-	ackData.push_back((fcs >> 8) & 0xFF);
-	ackData.push_back((fcs >> 16) & 0xFF);
-	ackData.push_back((fcs >> 24) & 0xFF);
-
-	return ackData;
+	// No FCS: the radiotap header does not set the FCS flag, so the
+	// hardware appends it (an extra one would make the frame invalid).
+	return {reinterpret_cast<uint8_t*>(&ack), reinterpret_cast<uint8_t*>(&ack) + sizeof(AckPacket) - sizeof(uint32_t)};
 }
 
 const uint8_t* PacketHandler::getReceiver(const libwifi_frame* frame) const
@@ -254,4 +262,9 @@ void PacketHandler::setChannel(const uint8_t channel) const
 uint8_t PacketHandler::getChannel()
 {
 	return m_channel;
+}
+
+PacketHandler::RxStats PacketHandler::getRxStats() const
+{
+	return {m_rxToUs.load(), m_rxRetries.load()};
 }
