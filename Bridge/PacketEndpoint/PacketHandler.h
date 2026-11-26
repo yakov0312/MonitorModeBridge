@@ -20,6 +20,7 @@ class PacketHandler
 public:
 	PacketHandler();
 	PacketHandler(uint8_t channel, const uint8_t* apMac);
+	~PacketHandler();
 
 	// Receive related
 	bool waitForPacket(uint16_t timeout); // In ms
@@ -62,7 +63,7 @@ private:
 	void setChannel() const;
 	static uint8_t m_channel;
 
-	bool m_isSniffing;
+	std::atomic<bool> m_isSniffing;
 	std::thread m_sniffer;
 
 	std::condition_variable m_cv;

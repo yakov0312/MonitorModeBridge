@@ -37,6 +37,15 @@ PacketHandler::PacketHandler(const uint8_t channel, const uint8_t* apMac) :
 	addRadioTap(m_apAck);
 }
 
+PacketHandler::~PacketHandler()
+{
+	// A joinable std::thread in a destructor calls std::terminate
+	if (m_isSniffing)
+		toggleSniffing();
+	else if (m_sniffer.joinable())
+		m_sniffer.join();
+}
+
 bool PacketHandler::waitForPacket(const uint16_t timeout)
 {
 	std::unique_lock lock(m_mutex);
@@ -50,14 +59,18 @@ void PacketHandler::toggleSniffing()
 {
 	if (!m_isSniffing)
 	{
+		// Wake up recv() regularly so toggling sniffing off can join the thread
+		constexpr timeval RECV_TIMEOUT = { .tv_sec = 0, .tv_usec = 200000 };
+		setsockopt(m_socket, SOL_SOCKET, SO_RCVTIMEO, &RECV_TIMEOUT, sizeof(RECV_TIMEOUT));
+
 		m_isSniffing = true;
 		auto startLoop = [this]()
 		{
-			const pthread_t tid = pthread_self();
-			constexpr struct sched_param sch = { .sched_priority = 98 };
+			constexpr sched_param sch = { .sched_priority = 98 };
 
-			if (pthread_setschedparam(tid, SCHED_FIFO, &sch) != 0)
-				throw std::runtime_error("Failed to set thread to real-time priority");
+			// Real-time priority helps, but is not required (needs CAP_SYS_NICE)
+			if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &sch) != 0)
+				std::cerr << "Warning: could not set real-time priority for the receive thread" << std::endl;
 
 			uint8_t buffer[MAX_PACKET_SIZE];
 
@@ -66,14 +79,22 @@ void PacketHandler::toggleSniffing()
 				const ssize_t len = recv(m_socket, buffer, MAX_PACKET_SIZE, 0);
 				if (len < 0)
 				{
-					if (errno == EINTR) continue;  // Interrupted by signal
+					if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)
+						continue; // Interrupted by signal or timeout
 					std::cerr << "Recv failed with code " << errno << std::endl;
 					m_isSniffing = false;
 					break;
 				}
 
-				// Process packet
-				this->parsePackets(buffer, len);
+				// An exception escaping this thread would terminate the process
+				try
+				{
+					this->parsePackets(buffer, len);
+				}
+				catch (const std::exception& e)
+				{
+					std::cerr << "Packet handling failed: " << e.what() << std::endl;
+				}
 			}
 		};
 
@@ -82,7 +103,8 @@ void PacketHandler::toggleSniffing()
 	}
 
 	m_isSniffing = false;
-	m_sniffer.join();
+	if (m_sniffer.joinable())
+		m_sniffer.join();
 	emptyQueue(); // Delete the remaining packets
 }
 
