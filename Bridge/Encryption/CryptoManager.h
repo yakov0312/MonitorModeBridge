@@ -44,6 +44,7 @@ struct Cipher
 
 	const EVP_CIPHER* evpCipher;
 	std::vector<uint8_t> gtk;
+	uint8_t gtkKeyId = 0;
 	std::array<uint8_t, TK_SIZE> tk;
 };
 
@@ -58,7 +59,9 @@ public:
 	void setPtk(const uint8_t* nonce1, const uint8_t* nonce2, const uint8_t* aa, const uint8_t* spa);
 	// MIC over the EAPOL frame: eapolLength bytes starting at the EAPOL header
 	void setMic(EapolFrame& eapol, size_t eapolLength) const;
-	void decryptGtk(const uint8_t* encryptedGtk);
+	// Unwrap M3's encrypted key data (AES key wrap with the KEK) and take the
+	// GTK out of its GTK KDE. Returns the GTK key id.
+	uint8_t decryptGtk(const uint8_t* keyData, size_t keyDataLength);
 
 	static void printPacketDebug(const u_char* packet, uint32_t length);
 

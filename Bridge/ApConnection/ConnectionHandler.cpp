@@ -451,18 +451,44 @@ void ConnectionHandler::performHandshakeNonSAE()
 	std::vector m2(reinterpret_cast<uint8_t*>(&eapol), reinterpret_cast<uint8_t*>(&eapol) + sizeof(eapol));
 
 	m_packetHandler.sendPacket(m2);
-	frame = getHandshakePacketNonSAE();
 
-	pFrame = &frame;
-	memset(&wpaData, 0, sizeof(wpaData));
+	// Wait for M3. A repeated M1 (the AP retrying before our M2 arrived)
+	// is skipped instead of aborting the handshake.
+	libwifi_free_wpa_data(&wpaData);
+	for (int attempt = 0;; attempt++)
+	{
+		frame = getHandshakePacketNonSAE();
+		pFrame = &frame;
+		memset(&wpaData, 0, sizeof(wpaData));
 
-	if (libwifi_get_wpa_data(pFrame, &wpaData) != 0)
-		throw std::runtime_error("Failed to parse WPA data");
+		if (libwifi_get_wpa_data(pFrame, &wpaData) != 0)
+		{
+			libwifi_free_wifi_frame(pFrame);
+			throw std::runtime_error("Failed to parse WPA data");
+		}
 
-	if (libwifi_check_wpa_message(pFrame) != HANDSHAKE_M3)
-		throw std::runtime_error("Invalid wpa data");
+		const int message = libwifi_check_wpa_message(pFrame);
+		libwifi_free_wifi_frame(pFrame);
 
-	m_cryptoManager.decryptGtk(wpaData.key_info.key_data);
+		if (message == HANDSHAKE_M3)
+			break;
+
+		libwifi_free_wpa_data(&wpaData);
+		if (message != HANDSHAKE_M1 || attempt >= MAX_EAPOL_RECEIVE)
+			throw std::runtime_error("Expected EAPOL M3, got message " + std::to_string(message));
+	}
+
+	// Encrypted key data: RSN IE + GTK KDE, AES key-wrapped with the KEK
+	try
+	{
+		const uint8_t keyId = m_cryptoManager.decryptGtk(wpaData.key_info.key_data, wpaData.key_info.key_data_length);
+		std::cout << "GTK installed (key id " << static_cast<int>(keyId) << ")" << std::endl;
+	}
+	catch (...)
+	{
+		libwifi_free_wpa_data(&wpaData);
+		throw;
+	}
 
 	// M4: same replay counter as M3, no nonce, no key data
 	eapol.frameHeader.seqControl = static_cast<uint16_t>(eapolSeq++ << 4);
@@ -478,6 +504,7 @@ void ConnectionHandler::performHandshakeNonSAE()
 		reinterpret_cast<uint8_t*>(&eapol) + sizeof(EapolFrame) - KEY_DATA_SIZE);
 
 	m_packetHandler.sendPacket(m4);
+	libwifi_free_wpa_data(&wpaData);
 
 	// Handshake finished(no SAE)
 	std::cout << "finished EAPOL" << std::endl;

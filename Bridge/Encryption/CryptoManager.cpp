@@ -7,6 +7,7 @@
 #include <cstring>
 #include <iomanip>
 #include <iostream>
+#include <memory>
 #include <stdexcept>
 #include <vector>
 #include <openssl/evp.h>
@@ -187,30 +188,68 @@ void CryptoManager::setMic(EapolFrame& eapol, const size_t eapolLength) const
 	memcpy(eapol.keyDesc.mic, micOutput, m_akm.micSize);
 }
 
-void CryptoManager::decryptGtk(const uint8_t* encryptedGtk)
+uint8_t CryptoManager::decryptGtk(const uint8_t* keyData, const size_t keyDataLength)
 {
-	const uint8_t* kek = m_akm.ptk.data() + m_akm.kckSize;
-	const uint16_t encryptedGtkLen = ((m_cipher.gtk.size() / 8) + 1) * 8;
+	// AES key wrap (RFC 3394): input is n*8 bytes incl. the 8-byte integrity
+	// block, output 8 bytes shorter. The integrity check covers the whole
+	// block, so all of it must be unwrapped at once.
+	if (!keyData || keyDataLength < 16 || keyDataLength % 8 != 0)
+		throw std::runtime_error("M3: invalid encrypted key data length " + std::to_string(keyDataLength));
 
-	// The wrapping key size determines the algorithm variant
+	const uint8_t* kek = m_akm.ptk.data() + m_akm.kckSize;
 	const EVP_CIPHER* cipher = (m_akm.kekSize == 16) ? EVP_aes_128_wrap() : EVP_aes_256_wrap();
 
-	EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+	std::unique_ptr<EVP_CIPHER_CTX, decltype(&EVP_CIPHER_CTX_free)> ctx(EVP_CIPHER_CTX_new(), EVP_CIPHER_CTX_free);
 	if (!ctx)
 		throw std::runtime_error("EVP_CIPHER_CTX_new failed");
 
-	if (!EVP_DecryptInit_ex(ctx, cipher, nullptr, kek, nullptr))
+	// OpenSSL refuses wrap modes through EVP unless explicitly allowed
+	EVP_CIPHER_CTX_set_flags(ctx.get(), EVP_CIPHER_CTX_FLAG_WRAP_ALLOW);
+
+	if (!EVP_DecryptInit_ex(ctx.get(), cipher, nullptr, kek, nullptr))
 		throw std::runtime_error("EVP_DecryptInit_ex failed");
 
+	std::vector<uint8_t> plain(keyDataLength); // unwrap writes keyDataLength - 8
 	int outLen = 0;
-	if (!EVP_DecryptUpdate(ctx, m_cipher.gtk.data(), &outLen, encryptedGtk, encryptedGtkLen))
-		throw std::runtime_error("EVP_DecryptUpdate failed");
+	if (!EVP_DecryptUpdate(ctx.get(), plain.data(), &outLen, keyData, static_cast<int>(keyDataLength)))
+		throw std::runtime_error("M3: key data unwrap failed (wrong KEK?)");
 
 	int finalLen = 0;
-	if (!EVP_DecryptFinal_ex(ctx, m_cipher.gtk.data() + outLen, &finalLen))
-		throw std::runtime_error("EVP_DecryptFinal_ex failed");
+	if (!EVP_DecryptFinal_ex(ctx.get(), plain.data() + outLen, &finalLen))
+		throw std::runtime_error("M3: key data unwrap failed (wrong KEK?)");
+	plain.resize(outLen + finalLen);
 
-	EVP_CIPHER_CTX_free(ctx);
+	// Walk the elements: RSN IE (0x30), KDEs (0xdd len OUI type data...),
+	// padding (0xdd followed by zeros). GTK KDE: 0xdd len 00-0f-ac 01
+	// keyid/tx reserved GTK.
+	constexpr uint8_t KDE_TYPE = 0xdd;
+	constexpr uint8_t GTK_KDE_HEADER[] = {0x00, 0x0f, 0xac, 0x01};
+	constexpr size_t GTK_KDE_PREFIX = sizeof(GTK_KDE_HEADER) + 2; // OUI+type, keyid/tx, reserved
+
+	for (size_t i = 0; i + 2 <= plain.size();)
+	{
+		const uint8_t type = plain[i];
+		const uint8_t len = plain[i + 1];
+
+		if (type == KDE_TYPE && len == 0)
+			break; // padding
+		if (i + 2 + len > plain.size())
+			break;
+
+		const uint8_t* body = plain.data() + i + 2;
+		if (type == KDE_TYPE && len > GTK_KDE_PREFIX &&
+			memcmp(body, GTK_KDE_HEADER, sizeof(GTK_KDE_HEADER)) == 0)
+		{
+			const size_t gtkLen = len - GTK_KDE_PREFIX;
+			m_cipher.gtk.assign(body + GTK_KDE_PREFIX, body + GTK_KDE_PREFIX + gtkLen);
+			m_cipher.gtkKeyId = body[sizeof(GTK_KDE_HEADER)] & 0x03;
+			return m_cipher.gtkKeyId;
+		}
+
+		i += 2 + len;
+	}
+
+	throw std::runtime_error("M3: no GTK KDE in key data");
 }
 
 void CryptoManager::printPacketDebug(const u_char* packet, const uint32_t length)
