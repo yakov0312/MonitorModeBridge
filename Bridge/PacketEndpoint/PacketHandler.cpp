@@ -7,6 +7,7 @@
 #include <mutex>
 #include <linux/wireless.h>
 #include <sys/ioctl.h>
+#include <unistd.h>
 
 extern "C"
 {
