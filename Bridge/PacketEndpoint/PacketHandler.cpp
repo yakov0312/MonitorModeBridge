@@ -7,6 +7,7 @@
 #include <mutex>
 #include <linux/wireless.h>
 #include <sys/ioctl.h>
+#include <unistd.h>
 
 extern "C"
 {
@@ -18,8 +19,6 @@ extern "C"
 constexpr uint8_t RADIOTAP_HEADER_MIN_LENGTH = 12;
 constexpr uint8_t CHANNEL_FREQ_OFFSET = 10;
 
-uint8_t PacketHandler::m_channel = 0; // No one will be able to use anything so the value here does not really matter
-
 PacketHandler::PacketHandler() :
 	m_isSniffing(false), m_interfaceHandler(InterfaceHandler::getInstance()),
 	m_socket(m_interfaceHandler.getSocket()), m_deviceMac(m_interfaceHandler.getInterfaceMac()),
@@ -27,13 +26,12 @@ PacketHandler::PacketHandler() :
 {
 }
 
-PacketHandler::PacketHandler(const uint8_t channel, const uint8_t* apMac) :
+PacketHandler::PacketHandler(const uint8_t* apMac) :
 	m_isSniffing(false), m_interfaceHandler(InterfaceHandler::getInstance()),
 	m_socket(m_interfaceHandler.getSocket()),
 	m_deviceMac(m_interfaceHandler.getInterfaceMac()), m_apAck(createAck(apMac))
 {
 	memcpy(m_apMac, apMac, MAC_SIZE_BYTES);
-	setChannel(channel);
 	addRadioTap(m_apAck);
 }
 
@@ -99,25 +97,9 @@ std::optional<libwifi_frame> PacketHandler::getPacket()
 	return std::nullopt;
 }
 
-void PacketHandler::setChannel() const
-{
-	int sock = socket(AF_INET, SOCK_DGRAM, 0);
-	if (sock < 0) throw std::runtime_error("Cannot init socket");
-
-	iwreq wrq = {0};
-	strncpy(wrq.ifr_name, m_interfaceHandler.getInterfaceName().data(), IFNAMSIZ);
-	wrq.u.freq.m = 2412 + 5 * (m_channel - 1);
-	wrq.u.freq.e = 6;
-
-	if (ioctl(sock, SIOCSIWFREQ, &wrq) != 0)
-		throw std::runtime_error("Can't set channel. channel: " + std::to_string(m_channel));
-
-	close(sock);
-}
-
 void PacketHandler::parsePackets(const u_char* packet, const size_t size)
 {
-	libwifi_frame frame;
+	libwifi_frame frame{};
 
 	if (libwifi_get_wifi_frame(&frame, packet, size, IS_RADIOTAP) != 0)
 		return;
@@ -164,13 +146,14 @@ void PacketHandler::addRadioTap(std::vector<uint8_t> &packet)
 	// Check if packet already has radiotap header:
 	// Radiotap header starts with version = 0
 	// and length stored in bytes 2 and 3 (little endian)
+	const uint16_t channel = InterfaceHandler::getInterfaceChannel();
 
 	if (packet.size() >= 4 && // Bounds checking
 		packet[0] == 0x00  && // Version == 0
 		packet[1] == 0x00  && // padding = 0
  		*reinterpret_cast<uint16_t*>(&packet[2]) == RADIOTAP_SIZE) // Header size match
 	{
-		const uint16_t newFreq = 2412 + 5 * (m_channel - 1);
+		const uint16_t newFreq = 2412 + 5 * (channel - 1);
 		const auto freq = reinterpret_cast<uint16_t*>(&packet[CHANNEL_FREQ_OFFSET]);
 		*freq = newFreq; //you cannot change the channel without setting him so no need to do it
 		return;
@@ -181,7 +164,7 @@ void PacketHandler::addRadioTap(std::vector<uint8_t> &packet)
 	info.present = (1 << IEEE80211_RADIOTAP_FLAGS) | (1 << IEEE80211_RADIOTAP_CHANNEL);
 
 	info.flags = 0x00;
-	info.channel.freq = 2412 + 5 * (m_channel - 1);
+	info.channel.freq = 2412 + 5 * (channel - 1);
 	info.channel.flags = 0x00a0;
 
 	char radiotapHeader[LIBWIFI_MAX_RADIOTAP_LEN] = {0};
@@ -251,18 +234,4 @@ void PacketHandler::changeMacAp(const uint8_t* apMAc)
 	memcpy(m_apMac, apMAc, MAC_SIZE_BYTES);
 	m_apAck = std::move(createAck(m_apMac)); //since the ap has changed the ack should too
 	addRadioTap(m_apAck);
-}
-
-void PacketHandler::setChannel(const uint8_t channel) const
-{
-	if (channel != m_channel)
-	{
-		m_channel = channel;
-		setChannel();
-	}
-}
-
-uint8_t PacketHandler::getChannel()
-{
-	return m_channel;
 }

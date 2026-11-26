@@ -17,7 +17,8 @@ class PacketHandler
 
 public:
 	PacketHandler();
-	PacketHandler(uint8_t channel, const uint8_t* apMac);
+
+	explicit PacketHandler(const uint8_t* apMac);
 
 	// Receive related
 	bool waitForPacket(uint16_t timeout); // In ms
@@ -41,16 +42,8 @@ public:
 	// AP related
 	void changeMacAp(const uint8_t* apMAc);
 
-	// Channel related
-	void setChannel(uint8_t channel) const;
-	static uint8_t getChannel();
-
 private:
 	void parsePackets(const u_char* packet, size_t size);
-
-	// Channel related
-	void setChannel() const;
-	static uint8_t m_channel;
 
 	bool m_isSniffing;
 	std::thread m_sniffer;
@@ -64,6 +57,6 @@ private:
 	const uint8_t* m_deviceMac;
 
 	std::vector<uint8_t> m_apAck;
-	uint8_t m_apMac[MAC_SIZE_BYTES];
+	uint8_t m_apMac[MAC_SIZE_BYTES]{};
 
 };

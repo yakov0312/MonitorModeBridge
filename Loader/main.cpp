@@ -10,7 +10,7 @@ int main()
 	try
 	{
 		Manager& m = Manager::getManager();
-		m.connectToNetwork(BasicNetworkInfo("Kali Network", "MyKaliLin"));
+		m.connectToNetwork(BasicNetworkInfo("Dudnik", "0546424000"));
 	}
 	catch(const std::exception& e)
 	{

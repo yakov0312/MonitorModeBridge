@@ -4,44 +4,66 @@
 
 #include <string>
 
+// nl80211 context
+#include <netlink/netlink.h>
+
 class InterfaceHandler
 {
 public:
-	~InterfaceHandler();
-	static InterfaceHandler& getInstance();
+    ~InterfaceHandler();
+    static InterfaceHandler& getInstance();
 
-	// Error related
-	void resolveErrors();
+    // Device management
+    [[nodiscard]] bool setInterfaceChannel(uint16_t channel) const;
 
-	void setFilters() const;
+    // Error recovery
+    void resolveErrors();
 
-	// Helper
-	static void setInterfaceToManaged();
-	static void setInterfaceToManaged(int sig);
+    // Packet filter
+    void setFilters() const;
 
-	// Getters
-	[[nodiscard]] const uint8_t* getInterfaceMac() const;
-	[[nodiscard]] std::string getInterfaceName() const;
-	[[nodiscard]] int getSocket() const;
+    // Restore device
+    static void setInterfaceToManaged();
+    static void setInterfaceToManaged(int sig);
+
+    // Getters
+    [[nodiscard]] const uint8_t* getInterfaceMac() const;
+    [[nodiscard]] std::string getInterfaceName() const;
+    [[nodiscard]] int getSocket() const;
+    [[nodiscard]] static uint16_t getInterfaceChannel();
 
 private:
-	InterfaceHandler();
+    InterfaceHandler();
 
-	// Initialize
-	void initializeInterface();
+    // Device setup flow
+    void initNL();
+    void setMonitorMode() const;
+    void initializeInterface();
 
-	// Instance
-	static InterfaceHandler m_instance;
+    // Helpers
+    void findWirelessInterface();
+    void openRawSocket();
+    void closeSocket();
 
-	// Helpers
-	static std::string findWirelessInterface();
-	void closeSocket();
-	void openRawSocket();
-	static int getInterfaceIndex(const std::string& iface);
-	static bool isMonitorMode(const std::string& iface);
+    [[nodiscard]] bool setInterfaceMode(uint32_t mode) const;
+    [[nodiscard]] bool setInterfaceState(bool up);
 
-	// Device
-	int m_socket;
-	uint8_t m_interfaceMac[MAC_SIZE_BYTES];
-	std::string m_interfaceName;
+    struct nl80211_ctx
+    {
+        nl_sock* genericSock = nullptr;
+        nl_sock* rtSock = nullptr;
+        int family = -1;
+    };
+
+    nl80211_ctx m_nl;
+
+    int m_socket;
+    uint8_t m_interfaceMac[MAC_SIZE_BYTES];
+    std::string m_interfaceName;
+    uint32_t m_interfaceIndex;
+    bool m_interfaceState = true; // UP
+
+    static uint16_t m_channel;
+
+    static InterfaceHandler m_instance;
 };
