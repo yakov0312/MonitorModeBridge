@@ -1,0 +1,275 @@
+From 89049045d5fb3785d0712cc6913b43de6d376d45 Mon Sep 17 00:00:00 2001
+From: MonitorModeBridge <noreply@example.invalid>
+Date: Thu, 26 Nov 2026 00:25:41 +0000
+Subject: [PATCH] wifi: mt76: mt7927: experimental active monitor support
+
+mt792x stopped advertising NL80211_FEATURE_ACTIVE_MONITOR because
+mt7921/mt7925 firmware stops RX in active monitor mode.  MT7927 handles
+every monitor interface as a real vif (NO_VIRTUAL_MONITOR) with its own
+OMAC, so the active flag barely changes what the driver does there.
+
+- mt792x_lib.allow_active_monitor=1 advertises active monitor on MT7927.
+- Track real monitor vifs and keep runtime PM / deep sleep off while any
+  exist.  With NO_VIRTUAL_MONITOR, IEEE80211_CONF_MONITOR is never set,
+  so the chip could otherwise doze while monitoring.
+- Enter sniffer mode when a monitor vif is first assigned a chanctx (it
+  was only done on chanctx change), and leave it when the last monitor
+  vif on that band goes away.
+- mt7925_common.monitor_sniffer=0 skips firmware sniffer mode and
+  programs the channel through the normal BSS path instead, to test
+  whether the hardware ACKs frames to the monitor vif address.
+---
+ mt7925/debugfs.c |  2 +-
+ mt7925/main.c    | 93 ++++++++++++++++++++++++++++++++++++++++++++++--
+ mt7925/mcu.c     |  7 +++-
+ mt7925/mt7925.h  | 11 ++++++
+ mt792x.h         |  3 ++
+ mt792x_core.c    | 12 ++++++-
+ 6 files changed, 122 insertions(+), 6 deletions(-)
+
+diff --git a/mt7925/debugfs.c b/mt7925/debugfs.c
+index 6dd93eb..3b67fe5 100644
+--- a/mt7925/debugfs.c
++++ b/mt7925/debugfs.c
+@@ -228,7 +228,7 @@ mt7925_deep_sleep_set(void *data, u64 val)
+ {
+ 	struct mt792x_dev *dev = data;
+ 	struct mt76_connac_pm *pm = &dev->pm;
+-	bool monitor = !!(dev->mphy.hw->conf.flags & IEEE80211_CONF_MONITOR);
++	bool monitor = mt7925_monitor_enabled(dev);
+ 	bool enable = !!val;
+ 
+ 	if (mt76_is_usb(&dev->mt76))
+diff --git a/mt7925/main.c b/mt7925/main.c
+index 8d591f2..6dfbacf 100644
+--- a/mt7925/main.c
++++ b/mt7925/main.c
+@@ -13,6 +13,56 @@
+ #include "mac.h"
+ #include "nan.h"
+ 
++static bool monitor_sniffer = true;
++module_param(monitor_sniffer, bool, 0644);
++MODULE_PARM_DESC(monitor_sniffer,
++		 "Use firmware sniffer mode for real monitor vifs (MT7927)");
++
++static void mt7925_monitor_pm_update(struct mt792x_dev *dev)
++{
++	struct mt76_connac_pm *pm = &dev->pm;
++	bool monitor = mt7925_monitor_enabled(dev);
++
++	pm->enable = pm->enable_user && !monitor;
++	pm->ds_enable = pm->ds_enable_user && !monitor;
++	mt7925_mcu_set_deep_sleep(dev, pm->ds_enable);
++}
++
++static void mt7925_monitor_set_chanctx(struct mt792x_dev *dev,
++				       struct ieee80211_vif *vif,
++				       struct ieee80211_chanctx_conf *ctx)
++{
++	struct mt792x_vif *mvif = (struct mt792x_vif *)vif->drv_priv;
++
++	if (monitor_sniffer) {
++		mt7925_mcu_set_sniffer(dev, vif, true);
++		mt7925_mcu_config_sniffer(mvif, ctx);
++		mt7925_mcu_set_beacon_filter(dev, vif, false);
++	} else {
++		mt7925_mcu_set_chctx(mvif->phy->mt76, &mvif->bss_conf.mt76,
++				     &vif->bss_conf, ctx);
++	}
++}
++
++struct mt7925_monitor_band_iter_data {
++	struct ieee80211_vif *skip;
++	u8 band_idx;
++	bool found;
++};
++
++static void mt7925_monitor_band_iter(void *priv, u8 *mac,
++				     struct ieee80211_vif *vif)
++{
++	struct mt7925_monitor_band_iter_data *data = priv;
++	struct mt792x_vif *mvif = (struct mt792x_vif *)vif->drv_priv;
++
++	if (vif == data->skip || vif->type != NL80211_IFTYPE_MONITOR)
++		return;
++
++	if (mvif->bss_conf.mt76.band_idx == data->band_idx)
++		data->found = true;
++}
++
+ static void
+ mt7925_init_he_caps(struct mt792x_phy *phy, enum nl80211_band band,
+ 		    struct ieee80211_sband_iftype_data *data,
+@@ -480,6 +530,11 @@ mt7925_add_interface(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
+ 
+ 	if (vif->type == NL80211_IFTYPE_NAN)
+ 		dev->nan_vif = vif;
++
++	if (vif->type == NL80211_IFTYPE_MONITOR) {
++		dev->monitor_vifs++;
++		mt7925_monitor_pm_update(dev);
++	}
+ out:
+ 	mt792x_mutex_release(dev);
+ 
+@@ -498,6 +553,28 @@ mt7925_remove_interface(struct ieee80211_hw *hw, struct ieee80211_vif *vif)
+ 	if (dev->nan_vif == vif)
+ 		dev->nan_vif = NULL;
+ 
++	if (vif->type == NL80211_IFTYPE_MONITOR && dev->monitor_vifs) {
++		struct mt7925_monitor_band_iter_data data = {
++			.skip = vif,
++			.band_idx = mvif->bss_conf.mt76.band_idx,
++		};
++
++		/* Leave sniffer mode on this band unless another monitor
++		 * vif still uses it.
++		 */
++		if (ieee80211_hw_check(hw, NO_VIRTUAL_MONITOR)) {
++			ieee80211_iterate_active_interfaces_atomic(hw,
++								   IEEE80211_IFACE_ITER_RESUME_ALL,
++								   mt7925_monitor_band_iter,
++								   &data);
++			if (!data.found)
++				mt7925_mcu_set_sniffer(dev, vif, false);
++		}
++
++		dev->monitor_vifs--;
++		mt7925_monitor_pm_update(dev);
++	}
++
+ 	mconf = mt792x_link_conf_to_mconf(&vif->bss_conf);
+ 	mt792x_mac_link_bss_remove(dev, mconf, &mvif->sta.deflink);
+ 
+@@ -803,6 +880,7 @@ mt7925_sniffer_interface_iter(void *priv, u8 *mac, struct ieee80211_vif *vif)
+ 	bool monitor = !!(hw->conf.flags & IEEE80211_CONF_MONITOR);
+ 
+ 	mt7925_mcu_set_sniffer(dev, vif, monitor);
++	monitor = mt7925_monitor_enabled(dev);
+ 	pm->enable = pm->enable_user && !monitor;
+ 	pm->ds_enable = pm->ds_enable_user && !monitor;
+ 
+@@ -816,7 +894,7 @@ void mt7925_set_runtime_pm(struct mt792x_dev *dev)
+ {
+ 	struct ieee80211_hw *hw = mt76_hw(dev);
+ 	struct mt76_connac_pm *pm = &dev->pm;
+-	bool monitor = !!(hw->conf.flags & IEEE80211_CONF_MONITOR);
++	bool monitor = mt7925_monitor_enabled(dev);
+ 
+ 	pm->enable = pm->enable_user && !monitor;
+ 	ieee80211_iterate_active_interfaces(hw,
+@@ -2056,8 +2134,7 @@ mt7925_change_chanctx(struct ieee80211_hw *hw,
+ 
+ 	mt792x_mutex_acquire(phy->dev);
+ 	if (vif->type == NL80211_IFTYPE_MONITOR) {
+-		mt7925_mcu_set_sniffer(mvif->phy->dev, vif, true);
+-		mt7925_mcu_config_sniffer(mvif, ctx);
++		mt7925_monitor_set_chanctx(mvif->phy->dev, vif, ctx);
+ 	} else {
+ 		if (ieee80211_vif_is_mld(vif)) {
+ 			unsigned long valid = mvif->valid_links;
+@@ -2448,6 +2525,16 @@ static int mt7925_assign_vif_chanctx(struct ieee80211_hw *hw,
+ 	mt76_phy_chandef_set(mvif->phy->mt76, &ctx->def);
+ 	mutex_unlock(&dev->mt76.mutex);
+ 
++	/* Real monitor vifs (MT7927) must enter sniffer mode as soon as they
++	 * get a channel, not only on a later channel change.
++	 */
++	if (vif->type == NL80211_IFTYPE_MONITOR &&
++	    ieee80211_hw_check(hw, NO_VIRTUAL_MONITOR)) {
++		mt792x_mutex_acquire(dev);
++		mt7925_monitor_set_chanctx(dev, vif, ctx);
++		mt792x_mutex_release(dev);
++	}
++
+ 	return 0;
+ }
+ 
+diff --git a/mt7925/mcu.c b/mt7925/mcu.c
+index 153bdec..ca5068f 100644
+--- a/mt7925/mcu.c
++++ b/mt7925/mcu.c
+@@ -2330,7 +2330,12 @@ int mt7925_mcu_set_sniffer(struct mt792x_dev *dev, struct ieee80211_vif *vif,
+ 
+ 		chan = ctx ? ctx->def.chan : mvif->phy->mt76->chandef.chan;
+ 
+-		if (chan)
++		/* vif already left its chanctx (interface removal): use the
++		 * band it was configured on, not whatever the phy is on now.
++		 */
++		if (!ctx && mvif->bss_conf.mt76.band_idx != 0xff)
++			req.hdr.band_idx = mvif->bss_conf.mt76.band_idx;
++		else if (chan)
+ 			req.hdr.band_idx = mt7927_band_idx(chan->band);
+ 	}
+ 
+diff --git a/mt7925/mt7925.h b/mt7925/mt7925.h
+index 636efe0..a8275be 100644
+--- a/mt7925/mt7925.h
++++ b/mt7925/mt7925.h
+@@ -363,6 +363,17 @@ void mt7925e_axidma_cal_cache_init(struct mt792x_dev *dev);
+ void mt7925_mac_add_txs(struct mt792x_dev *dev, void *data);
+ void mt7928_mac_add_txs_msg(struct mt792x_dev *dev, void *evt);
+ void mt7925_set_runtime_pm(struct mt792x_dev *dev);
++
++/* Runtime PM and deep sleep must stay off while monitoring: either the
++ * mac80211 virtual monitor is up (IEEE80211_CONF_MONITOR) or real monitor
++ * vifs were added (NO_VIRTUAL_MONITOR on MT7927, which never sets
++ * IEEE80211_CONF_MONITOR).
++ */
++static inline bool mt7925_monitor_enabled(struct mt792x_dev *dev)
++{
++	return (mt76_hw(dev)->conf.flags & IEEE80211_CONF_MONITOR) ||
++	       dev->monitor_vifs;
++}
+ void mt7925_mcu_set_suspend_iter(void *priv, u8 *mac,
+ 				 struct ieee80211_vif *vif);
+ void mt7925_connac_mcu_set_suspend_iter(void *priv, u8 *mac,
+diff --git a/mt792x.h b/mt792x.h
+index a7d71e0..3814596 100644
+--- a/mt792x.h
++++ b/mt792x.h
+@@ -301,6 +301,9 @@ struct mt792x_dev {
+ 
+ 	struct mac_address macaddr_list[8];
+ 
++	/* monitor vifs handed to the driver (NO_VIRTUAL_MONITOR) */
++	u8 monitor_vifs;
++
+ 	const struct mt76_bus_ops *bus_ops;
+ 	struct mt792x_phy phy;
+ 
+diff --git a/mt792x_core.c b/mt792x_core.c
+index d6f3a24..1302098 100644
+--- a/mt792x_core.c
++++ b/mt792x_core.c
+@@ -8,6 +8,11 @@
+ #include "mt792x.h"
+ #include "dma.h"
+ 
++static bool allow_active_monitor;
++module_param(allow_active_monitor, bool, 0444);
++MODULE_PARM_DESC(allow_active_monitor,
++		 "Advertise NL80211_FEATURE_ACTIVE_MONITOR on MT7927 (experimental)");
++
+ static const struct ieee80211_iface_limit if_limits[] = {
+ 	{
+ 		.max = MT792x_MAX_INTERFACES,
+@@ -820,7 +825,12 @@ int mt792x_init_wiphy(struct ieee80211_hw *hw)
+ 
+ 	wiphy->features |= NL80211_FEATURE_SCHED_SCAN_RANDOM_MAC_ADDR |
+ 			   NL80211_FEATURE_SCAN_RANDOM_MAC_ADDR;
+-	phy->mt76->no_active_monitor = true;
++	/* mt7921/mt7925 firmware stops RX in active monitor mode.  MT7927 runs
++	 * every monitor as a real vif (NO_VIRTUAL_MONITOR) with its own OMAC, so
++	 * allow opting in there for testing.
++	 */
++	phy->mt76->no_active_monitor = !(allow_active_monitor &&
++					 is_mt7927(&dev->mt76));
+ 	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_SET_SCAN_DWELL);
+ 	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_BEACON_RATE_LEGACY);
+ 	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_BEACON_RATE_HT);
+-- 
+2.43.0
+

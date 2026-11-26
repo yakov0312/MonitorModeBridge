@@ -29,3 +29,6 @@ cmake-build-*/
 
 # Editor swap files
 *.swp
+
+# Driver build output
+Driver/mt7927/build/

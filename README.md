@@ -31,3 +31,5 @@ From M1 the client constructs the M2 packet that contain S nonce(randomly genera
 The M3 packet is then sent by the host to the client with the following data: MIC, counter, encrypted GTK, and optional RSN info the client decrypt the GTK using the KEK and installs the key.  
 The last packet that is sent for this handshake is the M4 packet. The M4 is sent by the client to the host to signal success to the host and mark the start of the connection.  
 
+**Active monitor driver (MT7927 / Fedora):**
+An experimental patch for the MediaTek MT7927 (`mt7925e`) driver that enables active monitor mode, with Fedora build and test scripts, is in [`Driver/mt7927`](Driver/mt7927/README.md).
