@@ -36,7 +36,6 @@ std::optional<Bss> Bss::parse(const Frame& frame)
 	bss.receiver = frame.header().addr1;
 	bss.transmitter = frame.header().addr2;
 	bss.bssid = frame.header().addr3;
-	bss.signal = frame.signal();
 	bss.timestamp = fixed.timestamp;
 	bss.beaconInterval = fixed.interval;
 	bss.capabilities = fixed.capabilities;
@@ -44,12 +43,12 @@ std::optional<Bss> Bss::parse(const Frame& frame)
 	return bss;
 }
 
-void Bss::readTags(const Tags& source, const bool privacy)
+void Bss::readTags(Tags source, const bool privacy)
 {
-	tags = source;
+	tags = std::move(source);
 	encryptionInfo = privacy ? Wpa::Flag::Wep : 0;
 
-	for (const Tag& tag : tags)
+	for (const Tag tag : tags)
 	{
 		switch (static_cast<TagNumber>(tag.number))
 		{
@@ -81,7 +80,7 @@ void Bss::readTags(const Tags& source, const bool privacy)
 			{
 				encryptionInfo &= ~Wpa::Flag::Wep;
 				encryptionInfo |= Wpa::Flag::Wpa;
-				if (auto info = Wpa::WpaInfo::parse(std::span(tag.data).subspan(4)))
+				if (auto info = Wpa::WpaInfo::parse(tag.data.subspan(4)))
 				{
 					encryptionInfo |= info->flags();
 					wpa = std::move(info);
@@ -99,7 +98,7 @@ void Bss::readTags(const Tags& source, const bool privacy)
 std::vector<uint8_t> Bss::supportedRates() const
 {
 	std::vector<uint8_t> rates;
-	for (const Tag& tag : tags)
+	for (const Tag tag : tags)
 		if (tag.is(TagNumber::SupportedRates) || tag.is(TagNumber::ExtendedSupportedRates))
 			rates.insert(rates.end(), tag.data.begin(), tag.data.end());
 	return rates;

@@ -36,39 +36,68 @@ bool isMulticastMac(const MacAddress& mac)
 /* BYTE WRITER */
 /*-------------*/
 
+// Each field is assembled in a small array and appended with one insert.
+// Writing byte by byte with push_back inlines the vector's grow path at
+// every call and made the code several times larger.
+namespace
+{
+	template <size_t N>
+	std::array<uint8_t, N> littleEndian(const uint64_t value)
+	{
+		std::array<uint8_t, N> out{};
+		for (size_t i = 0; i < N; i++)
+			out[i] = static_cast<uint8_t>(value >> (8 * i));
+		return out;
+	}
+
+	template <size_t N>
+	std::array<uint8_t, N> bigEndian(const uint64_t value)
+	{
+		std::array<uint8_t, N> out{};
+		for (size_t i = 0; i < N; i++)
+			out[N - 1 - i] = static_cast<uint8_t>(value >> (8 * i));
+		return out;
+	}
+}
+
+void ByteWriter::u8(const uint8_t value)
+{
+	m_out.push_back(value);
+}
+
 void ByteWriter::le16(const uint16_t value)
 {
-	u8(value & 0xFF);
-	u8(value >> 8);
+	bytes(littleEndian<2>(value));
 }
 
 void ByteWriter::le32(const uint32_t value)
 {
-	le16(value & 0xFFFF);
-	le16(value >> 16);
+	bytes(littleEndian<4>(value));
 }
 
 void ByteWriter::le64(const uint64_t value)
 {
-	le32(value & 0xFFFFFFFF);
-	le32(value >> 32);
+	bytes(littleEndian<8>(value));
 }
 
 void ByteWriter::be16(const uint16_t value)
 {
-	u8(value >> 8);
-	u8(value & 0xFF);
+	bytes(bigEndian<2>(value));
 }
 
 void ByteWriter::be64(const uint64_t value)
 {
-	for (int shift = 56; shift >= 0; shift -= 8)
-		u8(static_cast<uint8_t>(value >> shift));
+	bytes(bigEndian<8>(value));
 }
 
 void ByteWriter::bytes(const std::span<const uint8_t> data)
 {
 	m_out.insert(m_out.end(), data.begin(), data.end());
+}
+
+void ByteWriter::zeros(const size_t count)
+{
+	m_out.resize(m_out.size() + count, 0);
 }
 
 /*-------------*/

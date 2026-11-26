@@ -6,9 +6,11 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <initializer_list>
 #include <optional>
 #include <span>
 #include <string>
@@ -29,6 +31,53 @@ std::string macToString(const MacAddress& mac);
 bool isRandomizedMac(const MacAddress& mac);
 bool isMulticastMac(const MacAddress& mac);
 
+/*---------------*/
+/* STATIC VECTOR */
+/*---------------*/
+
+// A vector with a fixed capacity that lives inline (no heap). Used for the
+// short lists inside frames (RSN suites, radiotap words, antennas).
+// push_back() returns false and drops the item when full.
+template <class T, size_t N>
+class StaticVector
+{
+public:
+	StaticVector() = default;
+	StaticVector(std::initializer_list<T> items)
+	{
+		for (const T& item : items)
+			push_back(item);
+	}
+
+	bool push_back(const T& item)
+	{
+		if (m_size == N)
+			return false;
+		m_items[m_size++] = item;
+		return true;
+	}
+	void resize(size_t size) { m_size = size < N ? size : N; }
+	void clear() { m_size = 0; }
+
+	[[nodiscard]] size_t size() const { return m_size; }
+	[[nodiscard]] bool empty() const { return m_size == 0; }
+	[[nodiscard]] static constexpr size_t capacity() { return N; }
+	T& operator[](size_t i) { return m_items[i]; }
+	const T& operator[](size_t i) const { return m_items[i]; }
+	T& back() { return m_items[m_size - 1]; }
+	const T& back() const { return m_items[m_size - 1]; }
+	T* begin() { return m_items.data(); }
+	T* end() { return m_items.data() + m_size; }
+	const T* begin() const { return m_items.data(); }
+	const T* end() const { return m_items.data() + m_size; }
+
+	bool operator==(const StaticVector& other) const { return std::equal(begin(), end(), other.begin(), other.end()); }
+
+private:
+	std::array<T, N> m_items{};
+	size_t m_size = 0;
+};
+
 /*---------------------*/
 /* BYTE READER/WRITER  */
 /*---------------------*/
@@ -39,7 +88,7 @@ class ByteWriter
 public:
 	explicit ByteWriter(std::vector<uint8_t>& out) : m_out(out) {}
 
-	void u8(uint8_t value) { m_out.push_back(value); }
+	void u8(uint8_t value);
 	void le16(uint16_t value);
 	void le32(uint32_t value);
 	void le64(uint64_t value);
@@ -47,7 +96,7 @@ public:
 	void be64(uint64_t value);
 	void bytes(std::span<const uint8_t> data);
 	void mac(const MacAddress& mac) { bytes(mac); }
-	void zeros(size_t count) { m_out.insert(m_out.end(), count, 0); }
+	void zeros(size_t count);
 	[[nodiscard]] size_t size() const { return m_out.size(); }
 
 private:

@@ -129,7 +129,7 @@ struct RadiotapAntenna
 struct RadiotapInfo
 {
 	uint16_t length = 0;               // whole radiotap header, set by parse
-	std::vector<uint32_t> present;     // all presence words, set by parse
+	StaticVector<uint32_t, 8> present; // all presence words, set by parse
 
 	std::optional<uint64_t> tsft;
 	std::optional<uint8_t> flags;      // RadiotapFlag bits
@@ -145,7 +145,7 @@ struct RadiotapInfo
 	std::optional<uint8_t> dataRetries;
 	std::optional<RadiotapMcs> mcs;
 	std::optional<RadiotapTimestamp> timestamp;
-	std::vector<RadiotapAntenna> antennas;
+	StaticVector<RadiotapAntenna, 8> antennas;
 
 	[[nodiscard]] bool hasFcs() const { return flags.value_or(0) & RadiotapFlag::Fcs; }
 	[[nodiscard]] bool badFcs() const { return flags.value_or(0) & RadiotapFlag::BadFcs; }
@@ -162,6 +162,9 @@ public:
 	// Header length from bytes 2-3, or 0 if data does not start with a
 	// valid radiotap header
 	static uint16_t headerLength(std::span<const uint8_t> data);
+	// Just the Flags field (FCS present etc.), 0 if absent. Much cheaper
+	// than parse(): Flags is always the first or second field.
+	static uint8_t flags(std::span<const uint8_t> data);
 
 	// Builds a radiotap header with one presence word, containing every
 	// field of info that is set (tsft, flags, rate, channel, signal, noise,

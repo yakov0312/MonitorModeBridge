@@ -1,5 +1,6 @@
 #include "Radiotap.h"
 
+#include <bit>
 #include <iterator>
 
 namespace Wifi
@@ -73,6 +74,8 @@ namespace
 		// Namespaces after the first one describe one antenna each
 		if (ns > 0)
 		{
+			if (ns > info.antennas.capacity())
+				return;
 			if (info.antennas.size() < ns)
 				info.antennas.resize(ns);
 			RadiotapAntenna& antenna = info.antennas[ns - 1];
@@ -159,6 +162,30 @@ uint16_t Radiotap::headerLength(const std::span<const uint8_t> data)
 	return len;
 }
 
+uint8_t Radiotap::flags(const std::span<const uint8_t> data)
+{
+	const uint16_t len = headerLength(data);
+	if (len == 0)
+		return 0;
+
+	const uint32_t first = data[4] | data[5] << 8 | data[6] << 16 | static_cast<uint32_t>(data[7]) << 24;
+	if (!(first & (1u << RadiotapField::Flags)))
+		return 0;
+
+	// Skip the remaining presence words (bit 31 of each says another follows)
+	size_t offset = 8;
+	for (uint8_t last = data[7]; last & 0x80; offset += 4)
+	{
+		if (offset + 4 > len)
+			return 0;
+		last = data[offset + 3];
+	}
+	// Only TSFT (8 bytes, 8-aligned) can come before Flags
+	if (first & (1u << RadiotapField::Tsft))
+		offset = alignUp(offset, 8) + 8;
+	return offset < len ? data[offset] : 0;
+}
+
 std::optional<RadiotapInfo> Radiotap::parse(const std::span<const uint8_t> data)
 {
 	const uint16_t len = headerLength(data);
@@ -176,7 +203,8 @@ std::optional<RadiotapInfo> Radiotap::parse(const std::span<const uint8_t> data)
 		if (offset + 4 > len)
 			return std::nullopt;
 		ByteReader r(header.subspan(offset, 4));
-		info.present.push_back(r.le32());
+		if (!info.present.push_back(r.le32()))
+			return std::nullopt; // more presence words than anyone uses
 		offset += 4;
 	} while (info.present.back() & (1u << RadiotapField::Ext));
 
@@ -201,10 +229,10 @@ std::optional<RadiotapInfo> Radiotap::parse(const std::span<const uint8_t> data)
 			vendorSkip = 0;
 		}
 
-		for (uint8_t bit = 0; bit < 32; bit++)
+		// Visit only the set bits, lowest first
+		for (uint32_t pending = bits; pending != 0; pending &= pending - 1)
 		{
-			if (!(bits & (1u << bit)))
-				continue;
+			const auto bit = static_cast<uint8_t>(std::countr_zero(pending));
 
 			if (bit == RadiotapField::Ext)
 				continue;

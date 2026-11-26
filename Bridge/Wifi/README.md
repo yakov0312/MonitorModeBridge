@@ -2,11 +2,13 @@
 
 `#include <Wifi/Wifi.h>`. Everything is in `namespace Wifi`. All types are values that own their memory, so there's nothing to `free`.
 
+It is faster than libwifi and allocates once per received frame (see Performance).
+
 | Class | What |
 |---|---|
-| `Frame` | received frame (radiotap skipped, FCS cut off), replaces `libwifi_frame` |
+| `Frame` | received frame (radiotap kept raw, FCS cut off), replaces `libwifi_frame` |
 | `Radiotap` | radiotap parse (multi-word / per-antenna) and build |
-| `Tags` | tagged parameters: add / set / remove / find / serialize |
+| `Tags` | tagged parameters in one byte buffer: add / set / remove / find / iterate |
 | `Bss` | what a beacon or probe response says, replaces `libwifi_bss` |
 | `Beacon` | beacon frames |
 | `Probe` | `Probe::Request`, `Probe::Response` |
@@ -32,7 +34,7 @@ Every frame class has `create(...)` (same defaults as libwifi), `build()` → `s
 | `bss.encryption_info & WPA2` | `bss->has(Wpa::Flag::Wpa2)` |
 | `LIBWIFI_AKM_SUITE_PSK`, `LIBWIFI_PAIRWISE_CIPHER_SUITE_CCMP128`, … | `Wpa::Flag::AkmPsk`, `Wpa::Flag::PairwiseCcmp128`, … (same bits) |
 | `bss.rsn_info.group_cipher_suite.suite_type` | `bss->rsn->groupCipher.type` |
-| tag iterator loop looking for `TAG_SUPP_RATES` | `bss->tags.find(TagNumber::SupportedRates)->data` |
+| tag iterator loop looking for `TAG_SUPP_RATES` | `auto rates = bss->tags.find(TagNumber::SupportedRates);` then `rates->copy()` (a `std::vector`) or `rates->data` (a span) |
 | `libwifi_create_auth(&a, ap, me, ap, AUTH_OPEN, 1, 0)` | `Auth::create(ap, me, ap).build()` |
 | `(libwifi_auth_fixed_parameters*)f.body` → `status_code` | `Auth::parse(f)->status` / `->succeeded()` |
 | `libwifi_create_assoc_req` + `libwifi_quick_add_tag` | `auto r = Assoc::Request::create(...); r.tags.add(TagNumber::SupportedRates, rates);` |
@@ -46,6 +48,28 @@ Every frame class has `create(...)` (same defaults as libwifi), `build()` → `s
 | hand-built `EapolFrame` struct | `Wpa::EapolKey` + `buildDataFrame(bssid, me, seq)`, MIC at `EapolKey::micOffset()` |
 
 `toMac(const uint8_t*)` turns the existing raw MAC pointers into a `MacAddress`.
+
+## Things to know
+
+- **`Tag` is a view.** `tags.find(...)` and iterating `tags` give you a `Tag` whose `data` is a `std::span` into the `Tags` buffer. It stays valid until that `Tags` (or the `Bss`/frame object holding it) is changed or destroyed. Use `tag->copy()` to keep the bytes.
+- **`Frame::body()` and `bytes()` are views too**, valid while the `Frame` lives.
+- **Radiotap is decoded on demand.** `Frame::parse` only reads the radiotap length and FCS flag. `frame.radiotap()` and `frame.signal()` do the full decode (about 100 ns), so call them only when you need them. `Bss` has no `signal` field (libwifi never filled it in); use `frame.signal()`.
+
+## Performance
+
+Measured on `WifiConnectionSniff.pcapng`, `-O2`, ns per frame:
+
+| | libwifi | Wifi | allocations (Wifi) |
+|---|---|---|---|
+| parse any frame | ~180 | ~55 | 1 |
+| beacon → `Bss` | ~280 | ~210 | 2 (3 when the SSID is longer than 15 chars) |
+| build assoc request | ~125 | ~85 | 2 |
+
+How:
+- `Tags` is one contiguous buffer, the exact bytes on the air, instead of one vector per tag. Parsing is one copy and building is one append.
+- `Frame` keeps radiotap and the 802.11 frame in a single vector.
+- Short lists (radiotap presence words, antennas, RSN suites, PMKIDs) are `StaticVector`s: fixed capacity, stored inline, no heap.
+- `ByteWriter` appends whole fields at once. Byte-by-byte `push_back` inlined the vector's grow path everywhere and doubled the code size.
 
 ## Differences from libwifi
 

@@ -194,15 +194,19 @@ public:
 	/*----------------------------*/
 
 	using Pmkid = std::array<uint8_t, 16>;
+	// Inline lists, no heap. 8 suites is more than any AP advertises; extra
+	// ones are skipped (libwifi kept 6).
+	using SuiteList = StaticVector<Suite, 8>;
+	using PmkidList = StaticVector<Pmkid, 4>;
 
 	struct RsnInfo
 	{
 		uint16_t version = 1;
 		Suite groupCipher = Suite::cipher(CipherSuite::Ccmp128);
-		std::vector<Suite> pairwiseCiphers;
-		std::vector<Suite> akmSuites;
+		SuiteList pairwiseCiphers;
+		SuiteList akmSuites;
 		uint16_t capabilities = 0; // RsnCapability bits
-		std::vector<Pmkid> pmkids;
+		PmkidList pmkids;
 		std::optional<Suite> groupManagementCipher;
 
 		// A typical station RSN element: one pairwise cipher, one AKM
@@ -225,8 +229,8 @@ public:
 	{
 		uint16_t version = 1;
 		Suite multicastCipher;
-		std::vector<Suite> unicastCiphers;
-		std::vector<Suite> akmSuites;
+		SuiteList unicastCiphers;
+		SuiteList akmSuites;
 
 		// Body after the OUI and the vendor type byte
 		static std::optional<WpaInfo> parse(std::span<const uint8_t> body);

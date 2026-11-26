@@ -1,7 +1,9 @@
 // C++ replacement for libwifi: a received 802.11 frame.
 //
 // Unlike libwifi_frame this owns its bytes: copy it, move it, keep it in a
-// queue, and nothing has to be freed.
+// queue, and nothing has to be freed. Parsing costs one allocation (the
+// copy of the captured bytes); the radiotap header is kept raw and only
+// decoded when radiotap() is called.
 
 #pragma once
 
@@ -37,13 +39,15 @@ public:
 	[[nodiscard]] MacAddress source() const { return m_header.source(); }
 
 	// The 802.11 frame without radiotap and without FCS
-	[[nodiscard]] std::span<const uint8_t> bytes() const { return m_bytes; }
-	[[nodiscard]] size_t length() const { return m_bytes.size(); }
+	[[nodiscard]] std::span<const uint8_t> bytes() const { return std::span(m_raw).subspan(m_radiotapLength); }
+	[[nodiscard]] size_t length() const { return m_raw.size() - m_radiotapLength; }
 	[[nodiscard]] size_t headerLength() const { return m_headerLength; }
 	// Everything after the MAC header (fixed parameters, tags, payload)
 	[[nodiscard]] std::span<const uint8_t> body() const { return bytes().subspan(m_headerLength); }
 
-	[[nodiscard]] const std::optional<RadiotapInfo>& radiotap() const { return m_radiotap; }
+	// Decodes the radiotap header (nullopt if the frame had none)
+	[[nodiscard]] std::optional<RadiotapInfo> radiotap() const;
+	[[nodiscard]] std::span<const uint8_t> radiotapBytes() const { return std::span(m_raw).first(m_radiotapLength); }
 	[[nodiscard]] bool hasFcs() const { return m_fcs.has_value(); }
 	[[nodiscard]] std::optional<uint32_t> fcs() const { return m_fcs; }
 	// Signal in dBm from radiotap, if the driver reported it
@@ -53,9 +57,9 @@ private:
 	Frame() = default;
 
 	MacHeader m_header;
-	size_t m_headerLength = 0;
-	std::vector<uint8_t> m_bytes;
-	std::optional<RadiotapInfo> m_radiotap;
+	uint16_t m_headerLength = 0;
+	uint16_t m_radiotapLength = 0;
+	std::vector<uint8_t> m_raw; // radiotap + 802.11 frame, FCS cut off
 	std::optional<uint32_t> m_fcs;
 };
 

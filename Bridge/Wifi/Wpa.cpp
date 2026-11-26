@@ -13,143 +13,112 @@ using F = Wpa::Flag;
 /* FLAGS */
 /*-------*/
 
+// libwifi's bit layout is "base + suite type", so the suite -> flag mapping
+// is arithmetic: group ciphers start at bit 4, pairwise at 18, AKMs at 32
+// (bit 38 skipped). The names below are indexed the same way.
+namespace
+{
+	constexpr unsigned GROUP_BASE = 4;
+	constexpr unsigned PAIRWISE_BASE = 18;
+	constexpr unsigned AKM_BASE = 32;
+	constexpr uint8_t LAST_CIPHER = 13; // BIP-CMAC-256
+	constexpr uint8_t LAST_AKM = 20;    // PSK-SHA384
+
+	// AKMs that mean WPA3 rather than WPA2
+	constexpr uint32_t WPA3_AKMS = 1u << 8 | 1u << 9 | 1u << 10 | 1u << 11 | 1u << 12 | 1u << 13 |
+		1u << 15 | 1u << 17 | 1u << 18 | 1u << 19 | 1u << 20 | 1u << 24 | 1u << 25;
+
+	constexpr const char* CIPHER_NAMES[] = {"GROUP", "WEP40", "TKIP", "RESERVED", "CCMP128", "WEP104",
+		"BIP_CMAC128", "NOT_ALLOWED", "GCMP128", "GCMP256", "CCMP256", "BIP_GMAC128", "BIP_GMAC256", "BIP_CMAC256"};
+	constexpr const char* AKM_NAMES[] = {"RESERVED", "802.1X", "PSK", "802.1X_FT", "PSK_FT", "802.1X_SHA256",
+		"PSK_SHA256", "TDLS", "SAE", "SAE_FT", "AP_PEER", "802.1X_SUITEB_SHA256", "802.1X_SUITEB_SHA384",
+		"802.1X_FT_SHA384", "FILS_SHA256", "FILS_SHA384", "FILS_SHA256_FT", "FILS_SHA384_FT", "OWE",
+		"PSK_SHA384_FT", "PSK_SHA384"};
+
+	unsigned akmBit(const uint8_t type)
+	{
+		return AKM_BASE + type + (type >= 6 ? 1 : 0);
+	}
+
+	void append(std::string& out, const char* name)
+	{
+		if (!out.empty())
+			out += ", ";
+		out += name;
+	}
+}
+
 uint64_t Wpa::groupCipherFlag(const uint8_t suiteType)
 {
-	switch (static_cast<CS>(suiteType))
-	{
-	case CS::Wep40: return F::GroupWep40;
-	case CS::Tkip: return F::GroupTkip;
-	case CS::Reserved: return F::GroupReserved;
-	case CS::Ccmp128: return F::GroupCcmp128;
-	case CS::Wep104: return F::GroupWep104;
-	case CS::BipCmac128: return F::GroupBipCmac128;
-	case CS::GroupNotAllowed: return F::GroupNotAllowed;
-	case CS::Gcmp128: return F::GroupGcmp128;
-	case CS::Gcmp256: return F::GroupGcmp256;
-	case CS::Ccmp256: return F::GroupCcmp256;
-	case CS::BipGmac128: return F::GroupBipGmac128;
-	case CS::BipGmac256: return F::GroupBipGmac256;
-	case CS::BipCmac256: return F::GroupBipCmac256;
-	default: return 0;
-	}
+	// Type 0 ("use group") makes no sense for the group cipher itself
+	return suiteType >= 1 && suiteType <= LAST_CIPHER ? 1ULL << (GROUP_BASE + suiteType) : 0;
 }
 
 uint64_t Wpa::pairwiseCipherFlag(const uint8_t suiteType)
 {
-	switch (static_cast<CS>(suiteType))
-	{
-	case CS::UseGroup: return F::PairwiseUseGroup;
-	case CS::Wep40: return F::PairwiseWep40;
-	case CS::Tkip: return F::PairwiseTkip;
-	case CS::Reserved: return F::PairwiseReserved;
-	case CS::Ccmp128: return F::PairwiseCcmp128;
-	case CS::Wep104: return F::PairwiseWep104;
-	case CS::BipCmac128: return F::PairwiseBipCmac128;
-	case CS::GroupNotAllowed: return F::PairwiseNotAllowed;
-	case CS::Gcmp128: return F::PairwiseGcmp128;
-	case CS::Gcmp256: return F::PairwiseGcmp256;
-	case CS::Ccmp256: return F::PairwiseCcmp256;
-	case CS::BipGmac128: return F::PairwiseBipGmac128;
-	case CS::BipGmac256: return F::PairwiseBipGmac256;
-	case CS::BipCmac256: return F::PairwiseBipCmac256;
-	default: return 0;
-	}
+	return suiteType <= LAST_CIPHER ? 1ULL << (PAIRWISE_BASE + suiteType) : 0;
 }
 
 uint64_t Wpa::akmFlag(const uint8_t suiteType)
 {
-	switch (static_cast<AKM>(suiteType))
-	{
-	case AKM::Reserved: return F::Wpa2 | F::AkmReserved;
-	case AKM::Ieee8021x: return F::Wpa2 | F::Akm8021x;
-	case AKM::Psk: return F::Wpa2 | F::AkmPsk;
-	case AKM::FtIeee8021x: return F::Wpa2 | F::AkmFt8021x;
-	case AKM::FtPsk: return F::Wpa2 | F::AkmFtPsk;
-	case AKM::Ieee8021xSha256: return F::Wpa2 | F::Akm8021xSha256;
-	case AKM::PskSha256: return F::Wpa2 | F::AkmPskSha256;
-	case AKM::Tdls: return F::Wpa2 | F::AkmTdls;
-	case AKM::Sae: return F::Wpa3 | F::AkmSae;
-	case AKM::FtSae: return F::Wpa3 | F::AkmFtSae;
-	case AKM::ApPeerKey: return F::Wpa3 | F::AkmApPeerKey;
-	case AKM::Ieee8021xSuiteBSha256: return F::Wpa3 | F::Akm8021xSuiteBSha256;
-	case AKM::Ieee8021xSuiteBSha384: return F::Wpa3 | F::Akm8021xSuiteBSha384;
-	case AKM::FtIeee8021xSha384: return F::Wpa3 | F::AkmFt8021xSha384;
-	case AKM::FilsSha256: return F::Wpa2 | F::AkmFilsSha256;
-	case AKM::FilsSha384: return F::Wpa3 | F::AkmFilsSha384;
-	case AKM::FtFilsSha256: return F::Wpa2 | F::AkmFtFilsSha256;
-	case AKM::FtFilsSha384: return F::Wpa3 | F::AkmFtFilsSha384;
-	case AKM::Owe: return F::Wpa3 | F::AkmOwe;
-	case AKM::FtPskSha384: return F::Wpa3 | F::AkmFtPskSha384;
-	case AKM::PskSha384: return F::Wpa3 | F::AkmPskSha384;
-	case AKM::SaeExtKey: return F::Wpa3 | F::AkmSaeExtKey;
-	case AKM::FtSaeExtKey: return F::Wpa3 | F::AkmFtSaeExtKey;
-	default: return 0;
-	}
-}
-
-namespace
-{
-	struct FlagName
-	{
-		uint64_t flag;
-		const char* name;
-	};
-
-	std::string joinNames(const uint64_t flags, const std::initializer_list<FlagName> names)
-	{
-		if (flags == 0)
-			return "None";
-		std::string out;
-		for (const auto& [flag, name] : names)
-		{
-			if (!(flags & flag))
-				continue;
-			if (!out.empty())
-				out += ", ";
-			out += name;
-		}
-		return out;
-	}
+	uint64_t flag;
+	if (suiteType <= LAST_AKM)
+		flag = 1ULL << akmBit(suiteType);
+	else if (suiteType == static_cast<uint8_t>(AKM::SaeExtKey))
+		flag = F::AkmSaeExtKey;
+	else if (suiteType == static_cast<uint8_t>(AKM::FtSaeExtKey))
+		flag = F::AkmFtSaeExtKey;
+	else
+		return 0;
+	return flag | ((WPA3_AKMS >> suiteType & 1) ? F::Wpa3 : F::Wpa2);
 }
 
 std::string Wpa::securityTypes(const uint64_t flags)
 {
-	return joinNames(flags, {{F::Wpa3, "WPA3"}, {F::Wpa2, "WPA2"}, {F::Wpa, "WPA"}, {F::Wep, "WEP"}});
+	if (flags == 0)
+		return "None";
+	std::string out;
+	for (const auto& [flag, name] : {std::pair{F::Wpa3, "WPA3"}, {F::Wpa2, "WPA2"}, {F::Wpa, "WPA"}, {F::Wep, "WEP"}})
+		if (flags & flag)
+			append(out, name);
+	return out;
 }
 
 std::string Wpa::groupCiphers(const uint64_t flags)
 {
-	return joinNames(flags, {
-		{F::GroupWep40, "WEP40"}, {F::GroupTkip, "TKIP"}, {F::GroupReserved, "RESERVED"},
-		{F::GroupCcmp128, "CCMP128"}, {F::GroupWep104, "WEP104"}, {F::GroupBipCmac128, "BIP_CMAC128"},
-		{F::GroupNotAllowed, "NOT_ALLOWED"}, {F::GroupGcmp128, "GCMP128"}, {F::GroupGcmp256, "GCMP256"},
-		{F::GroupCcmp256, "CCMP256"}, {F::GroupBipGmac128, "BIP_GMAC128"}, {F::GroupBipGmac256, "BIP_GMAC256"},
-		{F::GroupBipCmac256, "BIP_CMAC256"}});
+	if (flags == 0)
+		return "None";
+	std::string out;
+	for (uint8_t type = 1; type <= LAST_CIPHER; type++)
+		if (flags & groupCipherFlag(type))
+			append(out, CIPHER_NAMES[type]);
+	return out;
 }
 
 std::string Wpa::pairwiseCiphers(const uint64_t flags)
 {
-	return joinNames(flags, {
-		{F::PairwiseUseGroup, "GROUP"}, {F::PairwiseWep40, "WEP40"}, {F::PairwiseTkip, "TKIP"},
-		{F::PairwiseReserved, "RESERVED"}, {F::PairwiseCcmp128, "CCMP128"}, {F::PairwiseWep104, "WEP104"},
-		{F::PairwiseBipCmac128, "BIP_CMAC128"}, {F::PairwiseNotAllowed, "NOT_ALLOWED"},
-		{F::PairwiseGcmp128, "GCMP128"}, {F::PairwiseGcmp256, "GCMP256"}, {F::PairwiseCcmp256, "CCMP256"},
-		{F::PairwiseBipGmac128, "BIP_GMAC128"}, {F::PairwiseBipGmac256, "BIP_GMAC256"},
-		{F::PairwiseBipCmac256, "BIP_CMAC256"}});
+	if (flags == 0)
+		return "None";
+	std::string out;
+	for (uint8_t type = 0; type <= LAST_CIPHER; type++)
+		if (flags & pairwiseCipherFlag(type))
+			append(out, CIPHER_NAMES[type]);
+	return out;
 }
 
 std::string Wpa::akmSuites(const uint64_t flags)
 {
-	return joinNames(flags, {
-		{F::AkmReserved, "RESERVED"}, {F::Akm8021x, "802.1X"}, {F::AkmPsk, "PSK"},
-		{F::AkmFt8021x, "802.1X_FT"}, {F::AkmFtPsk, "PSK_FT"}, {F::Akm8021xSha256, "802.1X_SHA256"},
-		{F::AkmPskSha256, "PSK_SHA256"}, {F::AkmTdls, "TDLS"}, {F::AkmSae, "SAE"}, {F::AkmFtSae, "SAE_FT"},
-		{F::AkmApPeerKey, "AP_PEER"}, {F::Akm8021xSuiteBSha256, "802.1X_SUITEB_SHA256"},
-		{F::Akm8021xSuiteBSha384, "802.1X_SUITEB_SHA384"}, {F::AkmFt8021xSha384, "802.1X_FT_SHA384"},
-		{F::AkmFilsSha256, "FILS_SHA256"}, {F::AkmFilsSha384, "FILS_SHA384"},
-		{F::AkmFtFilsSha256, "FILS_SHA256_FT"}, {F::AkmFtFilsSha384, "FILS_SHA384_FT"}, {F::AkmOwe, "OWE"},
-		{F::AkmFtPskSha384, "PSK_SHA384_FT"}, {F::AkmPskSha384, "PSK_SHA384"},
-		{F::AkmSaeExtKey, "SAE_EXT_KEY"}, {F::AkmFtSaeExtKey, "SAE_EXT_KEY_FT"}});
+	if (flags == 0)
+		return "None";
+	std::string out;
+	for (uint8_t type = 0; type <= LAST_AKM; type++)
+		if (flags & (1ULL << akmBit(type)))
+			append(out, AKM_NAMES[type]);
+	if (flags & F::AkmSaeExtKey)
+		append(out, "SAE_EXT_KEY");
+	if (flags & F::AkmFtSaeExtKey)
+		append(out, "SAE_EXT_KEY_FT");
+	return out;
 }
 
 /*----------*/
@@ -175,18 +144,17 @@ namespace
 	}
 
 	// count (le16) + count suites. False when the list is truncated.
-	bool readSuiteList(ByteReader& r, std::vector<Wpa::Suite>& out)
+	bool readSuiteList(ByteReader& r, Wpa::SuiteList& out)
 	{
 		const uint16_t count = r.le16();
 		if (!r.ok() || r.remaining() < static_cast<size_t>(count) * 4)
 			return false;
-		out.reserve(count);
 		for (uint16_t i = 0; i < count; i++)
-			out.push_back(readSuite(r));
+			out.push_back(readSuite(r)); // past capacity: read and dropped
 		return r.ok();
 	}
 
-	void writeSuiteList(ByteWriter& w, const std::vector<Wpa::Suite>& suites)
+	void writeSuiteList(ByteWriter& w, const Wpa::SuiteList& suites)
 	{
 		w.le16(static_cast<uint16_t>(suites.size()));
 		for (const auto& suite : suites)

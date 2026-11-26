@@ -12,6 +12,7 @@ Assoc::Request Assoc::Request::create(const MacAddress& receiver, const MacAddre
 {
 	Request request;
 	request.header = MacHeader::management(ManagementSubtype::AssocReq, receiver, transmitter, bssid);
+	request.tags.reserve(TYPICAL_TAGS_LENGTH);
 	request.setSsid(ssid);
 	request.setChannel(channel);
 	return request;
@@ -23,6 +24,7 @@ Assoc::Request Assoc::Request::createReassoc(const MacAddress& receiver, const M
 	Request request;
 	request.header = MacHeader::management(ManagementSubtype::ReassocReq, receiver, transmitter, bssid);
 	request.currentAp = currentAp;
+	request.tags.reserve(TYPICAL_TAGS_LENGTH);
 	request.setSsid(ssid);
 	request.setChannel(channel);
 	return request;
@@ -62,16 +64,16 @@ std::optional<Assoc::Request> Assoc::Request::parse(const Frame& frame)
 
 std::string Assoc::Request::ssid() const
 {
-	const Tag* tag = tags.find(TagNumber::Ssid);
-	if (tag == nullptr)
+	const auto tag = tags.find(TagNumber::Ssid);
+	if (!tag)
 		return {};
 	return {tag->data.begin(), tag->data.end()};
 }
 
 std::optional<Wpa::RsnInfo> Assoc::Request::rsn() const
 {
-	const Tag* tag = tags.find(TagNumber::Rsn);
-	if (tag == nullptr)
+	const auto tag = tags.find(TagNumber::Rsn);
+	if (!tag)
 		return std::nullopt;
 	return Wpa::RsnInfo::parse(tag->data);
 }
@@ -87,6 +89,7 @@ Assoc::Response Assoc::Response::create(const MacAddress& receiver, const MacAdd
 	response.header = MacHeader::management(
 		reassociation ? ManagementSubtype::ReassocResp : ManagementSubtype::AssocResp, receiver, transmitter, bssid);
 	response.associationId = aid;
+	response.tags.reserve(TYPICAL_TAGS_LENGTH);
 	response.tags.set(TagNumber::DsParameter, std::span<const uint8_t>(&channel, 1));
 	response.tags.add(TagNumber::SupportedRates, DEFAULT_SUPPORTED_RATES);
 	return response;

@@ -23,7 +23,7 @@ struct Bss
 	uint8_t channel = 0;      // DS Parameter Set / HT Operation primary channel
 	bool wps = false;
 	uint64_t encryptionInfo = 0; // Wpa::Flag bits
-	std::optional<int8_t> signal;
+	// (signal strength: frame.signal(), only decoded when you ask for it)
 	std::optional<Wpa::RsnInfo> rsn;
 	std::optional<Wpa::WpaInfo> wpa;
 
@@ -49,7 +49,7 @@ struct Bss
 
 	// Fills ssid/hidden/channel/wps/encryptionInfo/rsn/wpa from tags.
 	// privacy is the capability bit (WEP unless an RSN/WPA tag says more).
-	void readTags(const Tags& source, bool privacy);
+	void readTags(Tags source, bool privacy);
 };
 
 // Fixed parameters shared by beacons and probe responses:

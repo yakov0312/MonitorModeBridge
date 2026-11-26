@@ -1,4 +1,9 @@
 // C++ replacement for libwifi: tagged parameters (information elements).
+//
+// Tags keeps all tags in one byte buffer, exactly as they are on the air
+// (number, length, data, number, length, data...). Iterating or find()
+// hands out Tag views into that buffer: no copies. A Tag view is valid
+// until the Tags it came from is changed or destroyed.
 
 #pragma once
 
@@ -193,30 +198,47 @@ enum class TagExtension : uint8_t
 	EhtCapabilities = 108,
 };
 
-const char* tagName(uint8_t tagNumber);
-inline const char* tagName(TagNumber tag) { return tagName(static_cast<uint8_t>(tag)); }
-
 constexpr size_t TAG_HEADER_LENGTH = 2;
 constexpr size_t MAX_TAG_LENGTH = 255;
+// What create() reserves: SSID, channel, rates and RSN fit without regrowing
+constexpr size_t TYPICAL_TAGS_LENGTH = 96;
 
+// One tag: a view into a Tags buffer (or any byte buffer)
 struct Tag
 {
 	uint8_t number = 0;
-	std::vector<uint8_t> data;
+	std::span<const uint8_t> data;
 
 	[[nodiscard]] bool is(TagNumber tag) const { return number == static_cast<uint8_t>(tag); }
 	[[nodiscard]] size_t length() const { return TAG_HEADER_LENGTH + data.size(); }
 	// Vendor specific tags start with a 3-byte OUI and a 1-byte type
 	[[nodiscard]] bool isVendor(const std::array<uint8_t, 3>& oui, uint8_t type) const;
+	[[nodiscard]] std::vector<uint8_t> copy() const { return {data.begin(), data.end()}; }
 };
 
-// An ordered list of tags, kept in the order they are on the air.
 class Tags
 {
 public:
+	class Iterator
+	{
+	public:
+		using value_type = Tag;
+		using difference_type = std::ptrdiff_t;
+
+		Iterator() = default;
+		explicit Iterator(const uint8_t* pos) : m_pos(pos) {}
+		Tag operator*() const { return {m_pos[0], {m_pos + TAG_HEADER_LENGTH, m_pos[1]}}; }
+		Iterator& operator++() { m_pos += TAG_HEADER_LENGTH + m_pos[1]; return *this; }
+		Iterator operator++(int) { Iterator old = *this; ++*this; return old; }
+		bool operator==(const Iterator& other) const { return m_pos == other.m_pos; }
+
+	private:
+		const uint8_t* m_pos = nullptr;
+	};
+
 	Tags() = default;
 
-	// Splits raw tagged parameters. A truncated last tag is dropped and
+	// Copies raw tagged parameters. A truncated last tag is dropped and
 	// marks the result as not complete(); everything before it is kept.
 	static Tags parse(std::span<const uint8_t> data);
 
@@ -230,29 +252,34 @@ public:
 	void set(TagNumber number, std::string_view text);
 	// Removes every tag with this number, returns how many were removed
 	size_t remove(TagNumber number);
-	void clear() { m_tags.clear(); }
+	void clear() { m_raw.clear(); }
+	void reserve(size_t bytes) { m_raw.reserve(bytes); }
 
-	[[nodiscard]] const Tag* find(uint8_t number) const;
-	[[nodiscard]] const Tag* find(TagNumber number) const { return find(static_cast<uint8_t>(number)); }
-	[[nodiscard]] const Tag* findVendor(const std::array<uint8_t, 3>& oui, uint8_t type) const;
-	[[nodiscard]] const Tag* findExtension(TagExtension extension) const;
+	[[nodiscard]] std::optional<Tag> find(uint8_t number) const;
+	[[nodiscard]] std::optional<Tag> find(TagNumber number) const { return find(static_cast<uint8_t>(number)); }
+	[[nodiscard]] std::optional<Tag> findVendor(const std::array<uint8_t, 3>& oui, uint8_t type) const;
+	[[nodiscard]] std::optional<Tag> findExtension(TagExtension extension) const;
 	[[nodiscard]] size_t count(TagNumber number) const;
-	[[nodiscard]] bool contains(TagNumber number) const { return find(number) != nullptr; }
+	[[nodiscard]] bool contains(TagNumber number) const { return find(number).has_value(); }
 
-	// Serialized size and bytes of all tags
-	[[nodiscard]] size_t length() const;
-	void write(ByteWriter& writer) const;
-	[[nodiscard]] std::vector<uint8_t> serialize() const;
+	// The serialized tags: nothing to compute, it is the buffer itself
+	[[nodiscard]] std::span<const uint8_t> bytes() const { return m_raw; }
+	[[nodiscard]] size_t length() const { return m_raw.size(); }
+	void write(ByteWriter& writer) const { writer.bytes(m_raw); }
+	[[nodiscard]] std::vector<uint8_t> serialize() const { return m_raw; }
 
 	[[nodiscard]] bool complete() const { return m_complete; }
-	[[nodiscard]] bool empty() const { return m_tags.empty(); }
-	[[nodiscard]] size_t size() const { return m_tags.size(); }
-	[[nodiscard]] auto begin() const { return m_tags.begin(); }
-	[[nodiscard]] auto end() const { return m_tags.end(); }
-	[[nodiscard]] const std::vector<Tag>& all() const { return m_tags; }
+	[[nodiscard]] bool empty() const { return m_raw.empty(); }
+	// Number of tags (walks the buffer)
+	[[nodiscard]] size_t size() const;
+	[[nodiscard]] Iterator begin() const { return Iterator(m_raw.data()); }
+	[[nodiscard]] Iterator end() const { return Iterator(m_raw.data() + m_raw.size()); }
 
 private:
-	std::vector<Tag> m_tags;
+	// Byte offset of the first tag with this number, or npos
+	[[nodiscard]] size_t offsetOf(uint8_t number) const;
+
+	std::vector<uint8_t> m_raw;
 	bool m_complete = true;
 };
 

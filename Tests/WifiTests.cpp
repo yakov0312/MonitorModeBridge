@@ -324,15 +324,27 @@ static void testBuilders()
 		tags.add(Wifi::TagNumber::Ssid, "a");
 		tags.add(Wifi::TagNumber::DsParameter, static_cast<uint8_t>(1));
 		tags.set(Wifi::TagNumber::Ssid, "bb");
-		CHECK(tags.all()[0].data.size() == 2 && tags.size() == 2, "set replaces in place");
+		CHECK(tags.find(Wifi::TagNumber::Ssid)->data.size() == 2 && tags.size() == 2 &&
+			(*tags.begin()).is(Wifi::TagNumber::Ssid), "set replaces in place");
 		const std::vector<uint8_t> wps = {0x00, 0x50, 0xF2, 0x04, 0x10};
 		tags.add(Wifi::TagNumber::VendorSpecific, wps);
-		CHECK(tags.findVendor(Wifi::Wpa::OUI_MICROSOFT, Wifi::Wpa::MICROSOFT_TYPE_WPS) != nullptr, "vendor lookup");
+		CHECK(tags.findVendor(Wifi::Wpa::OUI_MICROSOFT, Wifi::Wpa::MICROSOFT_TYPE_WPS).has_value(), "vendor lookup");
 		CHECK(tags.remove(Wifi::TagNumber::DsParameter) == 1 && !tags.contains(Wifi::TagNumber::DsParameter), "remove");
 		auto bytes = tags.serialize();
 		bytes.pop_back();
 		auto cut = Wifi::Tags::parse(bytes);
 		CHECK(!cut.complete() && cut.size() == 1, "truncated tag dropped");
+		// set() growing and shrinking a tag in the middle keeps the others intact
+		Wifi::Tags t2;
+		t2.add(Wifi::TagNumber::Ssid, "abc");
+		t2.add(Wifi::TagNumber::DsParameter, static_cast<uint8_t>(6));
+		t2.set(Wifi::TagNumber::Ssid, "abcdefgh");
+		t2.set(Wifi::TagNumber::Ssid, "x");
+		const std::vector<uint8_t> expect = {0x00, 0x01, 'x', 0x03, 0x01, 0x06};
+		CHECK(t2.serialize() == expect, "set grow/shrink: " << hex(t2.bytes()));
+		t2.add(Wifi::TagNumber::Ssid, "y");
+		CHECK(t2.remove(Wifi::TagNumber::Ssid) == 2 && t2.size() == 1 && t2.find(Wifi::TagNumber::DsParameter)->data[0] == 6,
+			"remove all occurrences");
 		// zero-length SSID (wildcard) is a valid tag
 		const std::vector<uint8_t> wildcard = {0x00, 0x00, 0x01, 0x01, 0x82};
 		CHECK(Wifi::Tags::parse(wildcard).size() == 2, "zero-length tag kept");
@@ -422,8 +434,8 @@ static void compareFrame(const uint8_t* data, size_t len)
 				{
 					if (it.tag_header->tag_num == TAG_SUPP_RATES)
 					{
-						const Wifi::Tag* tag = mine->tags.find(Wifi::TagNumber::SupportedRates);
-						CHECK(tag && tag->data == std::vector<uint8_t>(it.tag_data, it.tag_data + it.tag_header->tag_len), "supported rates");
+						const auto tag = mine->tags.find(Wifi::TagNumber::SupportedRates);
+						CHECK(tag && tag->copy() == std::vector<uint8_t>(it.tag_data, it.tag_data + it.tag_header->tag_len), "supported rates");
 						break;
 					}
 				} while (libwifi_tag_iterator_next(&it) != -1);

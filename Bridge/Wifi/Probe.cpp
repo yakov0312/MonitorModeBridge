@@ -12,6 +12,7 @@ Probe::Request Probe::Request::create(const MacAddress& receiver, const MacAddre
 {
 	Request request;
 	request.header = MacHeader::management(ManagementSubtype::ProbeReq, receiver, transmitter, bssid);
+	request.tags.reserve(TYPICAL_TAGS_LENGTH);
 	request.setSsid(ssid);
 	request.setChannel(channel);
 	return request;
@@ -39,16 +40,16 @@ std::optional<Probe::Request> Probe::Request::parse(const Frame& frame)
 
 std::string Probe::Request::ssid() const
 {
-	const Tag* tag = tags.find(TagNumber::Ssid);
-	if (tag == nullptr)
+	const auto tag = tags.find(TagNumber::Ssid);
+	if (!tag)
 		return {};
 	return {tag->data.begin(), tag->data.end()};
 }
 
 std::optional<uint8_t> Probe::Request::channel() const
 {
-	const Tag* tag = tags.find(TagNumber::DsParameter);
-	if (tag == nullptr || tag->data.empty())
+	const auto tag = tags.find(TagNumber::DsParameter);
+	if (!tag || tag->data.empty())
 		return std::nullopt;
 	return tag->data[0];
 }
@@ -63,6 +64,7 @@ Probe::Response Probe::Response::create(const MacAddress& receiver, const MacAdd
 	Response response;
 	response.header = MacHeader::management(ManagementSubtype::ProbeResp, receiver, transmitter, bssid);
 	response.fixed.timestamp = currentTimestamp();
+	response.tags.reserve(TYPICAL_TAGS_LENGTH);
 	response.setSsid(ssid);
 	response.setChannel(channel);
 	return response;

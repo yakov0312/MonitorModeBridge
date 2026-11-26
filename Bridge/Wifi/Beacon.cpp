@@ -9,6 +9,7 @@ Beacon Beacon::create(const MacAddress& receiver, const MacAddress& transmitter,
 	Beacon beacon;
 	beacon.header = MacHeader::management(ManagementSubtype::Beacon, receiver, transmitter, bssid);
 	beacon.fixed.timestamp = currentTimestamp();
+	beacon.tags.reserve(TYPICAL_TAGS_LENGTH);
 	beacon.setSsid(ssid);
 	beacon.setChannel(channel);
 	return beacon;
