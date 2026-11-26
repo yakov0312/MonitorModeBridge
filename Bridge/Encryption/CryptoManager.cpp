@@ -44,7 +44,6 @@ constexpr uint16_t CMP256_MIC_SIZE = 8;
 constexpr uint8_t PTK_DATA_SIZE = 76;
 constexpr auto PTK_LABEL = "Pairwise key expansion";
 
-InterfaceHandler& CryptoManager::m_adapterHandler = InterfaceHandler::getInstance();
 
 CryptoManager::CryptoManager() : m_akm(), m_cipher()
 {
@@ -107,7 +106,8 @@ void CryptoManager::setPtk(const uint8_t* nonce1, const uint8_t* nonce2, const u
 	uint8_t* ptk = m_akm.ptk.data();
 
     // Get both MAC addresses
-    const uint8_t* mac2 = m_adapterHandler.getInterfaceMac();
+    // Looked up here, not in a static: a static would set up the card before main()
+    const uint8_t* mac2 = InterfaceHandler::getInstance().getInterfaceMac();
 
     // Ensure deterministic ordering (both sides must match exactly)
     if (memcmp(mac1, mac2, MAC_SIZE_BYTES) > 0)

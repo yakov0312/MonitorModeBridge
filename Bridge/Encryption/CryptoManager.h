@@ -61,7 +61,6 @@ public:
 	static void printPacketDebug(const u_char* packet, uint32_t length);
 
 private:
-	static InterfaceHandler& m_adapterHandler;
 
 	AKM m_akm;
 	Cipher m_cipher;

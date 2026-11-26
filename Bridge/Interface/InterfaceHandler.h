@@ -18,6 +18,13 @@ public:
     ~InterfaceHandler();
     static InterfaceHandler& getInstance();
 
+    // Use this interface instead of creating a temporary mmb0. A managed
+    // interface is switched to monitor in place; an interface that is already
+    // in monitor mode is used as-is. Either way it is left in monitor mode on
+    // exit, so it can be captured (e.g. Wireshark) across runs.
+    // Must be called before the first getInstance().
+    static void useInterface(const std::string& name);
+
     InterfaceHandler(const InterfaceHandler&) = delete;
     InterfaceHandler& operator=(const InterfaceHandler&) = delete;
 
@@ -49,6 +56,7 @@ private:
     void initNL();
     void findWirelessInterface();
     void createMonitorInterface();
+    void useInterfaceInPlace();
     void initializeInterface();
     void restore();
 
@@ -58,6 +66,8 @@ private:
 
     [[nodiscard]] bool newMonitorInterface(bool active) const;
     [[nodiscard]] bool deleteInterface(uint32_t ifindex) const;
+    [[nodiscard]] bool setMonitorMode(uint32_t ifindex, bool active) const;
+    [[nodiscard]] bool phySupportsActiveMonitor() const;
     [[nodiscard]] bool setInterfaceState(uint32_t ifindex, bool up) const;
     [[nodiscard]] bool sendAndWait(nl_msg* msg) const;
 
@@ -88,4 +98,5 @@ private:
     uint32_t m_wiphy;
 
     static uint16_t m_channel;
+    static std::string s_requestedInterface;
 };

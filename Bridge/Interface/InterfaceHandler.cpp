@@ -33,6 +33,7 @@ extern char** environ;
 constexpr int ARPHRD_RADIOTAP_TYPE = 803; // ARPHRD_IEEE80211_RADIOTAP
 
 uint16_t InterfaceHandler::m_channel = 0;
+std::string InterfaceHandler::s_requestedInterface;
 
 // The live instance, for cleanup from atexit/signal handlers
 static InterfaceHandler* s_active = nullptr;
@@ -40,6 +41,11 @@ static std::atomic<bool> s_restored{false};
 
 // Created on first use, so loading the library does not touch the card and
 // setup errors reach the caller instead of terminating during static init.
+void InterfaceHandler::useInterface(const std::string& name)
+{
+    s_requestedInterface = name;
+}
+
 InterfaceHandler& InterfaceHandler::getInstance()
 {
     static InterfaceHandler instance;
@@ -53,6 +59,17 @@ InterfaceHandler::InterfaceHandler() :
 {
     // Initialize nl80211 communication with kernel Wi-Fi subsystem
     initNL();
+
+    // --iface: work on the given interface and leave it as it is on exit
+    if (!s_requestedInterface.empty())
+    {
+        useInterfaceInPlace();
+        initializeInterface();
+        if (!setInterfaceChannel(1))
+            throw std::runtime_error("Failed to set channel 1 on interface " + m_interfaceName);
+        setFilters();
+        return;
+    }
 
     // Detect the card's managed interface (e.g. wlan0)
     findWirelessInterface();
@@ -199,6 +216,141 @@ void InterfaceHandler::createMonitorInterface()
     std::cout << "Monitor interface " << m_interfaceName << " on phy" << m_wiphy
               << (m_hardwareAck ? " (active monitor: hardware ACK)"
                                 : " (plain monitor: software ACK)") << std::endl;
+}
+
+void InterfaceHandler::useInterfaceInPlace()
+{
+    m_interfaceName = s_requestedInterface;
+    m_interfaceIndex = if_nametoindex(m_interfaceName.c_str());
+    if (!m_interfaceIndex)
+        throw std::runtime_error("No such interface: " + m_interfaceName);
+
+    std::ifstream indexFile("/sys/class/net/" + m_interfaceName + "/phy80211/index");
+    if (!(indexFile >> m_wiphy))
+        throw std::runtime_error(m_interfaceName + " is not a wireless interface");
+
+    if (isMonitorMode(m_interfaceName))
+    {
+        // Don't touch it: a capture running on it would stop on down/up.
+        // The flags it was created with can't be read back, so go by what
+        // the driver supports (MMB_SOFTWARE_ACK=1 overrides).
+        m_hardwareAck = phySupportsActiveMonitor();
+        std::cout << "Using existing monitor interface " << m_interfaceName << " as-is" << std::endl;
+    }
+    else
+    {
+        std::cout << "Switching " << m_interfaceName << " to monitor mode in place" << std::endl;
+
+        // Undo our changes if the switch fails half way
+        auto giveBack = [this]
+        {
+            (void)setInterfaceState(m_interfaceIndex, true);
+            runCommand({"nmcli", "device", "set", m_interfaceName, "managed", "yes"});
+        };
+
+        runCommand({"nmcli", "device", "set", m_interfaceName, "managed", "no"});
+        if (!setInterfaceState(m_interfaceIndex, false))
+        {
+            giveBack();
+            throw std::runtime_error("Failed to bring interface DOWN: " + m_interfaceName + " (run as root)");
+        }
+
+        m_hardwareAck = setMonitorMode(m_interfaceIndex, true);
+        if (!m_hardwareAck && !setMonitorMode(m_interfaceIndex, false))
+        {
+            giveBack();
+            throw std::runtime_error("Failed to switch " + m_interfaceName + " to monitor mode via nl80211");
+        }
+
+        if (!setInterfaceState(m_interfaceIndex, true))
+            throw std::runtime_error("Failed to bring interface UP: " + m_interfaceName);
+    }
+
+    if (const char* env = std::getenv("MMB_SOFTWARE_ACK"); env && env[0] == '1')
+        m_hardwareAck = false;
+
+    std::cout << "Monitor interface " << m_interfaceName << " on phy" << m_wiphy
+              << (m_hardwareAck ? " (hardware ACK)" : " (software ACK)") << "\n"
+              << "It stays in monitor mode after exit. To give it back to NetworkManager:\n"
+              << "  sudo ip link set " << m_interfaceName << " down\n"
+              << "  sudo iw dev " << m_interfaceName << " set type managed\n"
+              << "  sudo ip link set " << m_interfaceName << " up\n"
+              << "  sudo nmcli device set " << m_interfaceName << " managed yes" << std::endl;
+}
+
+// Switch an existing interface to monitor (flags [active] control otherbss)
+bool InterfaceHandler::setMonitorMode(const uint32_t ifindex, const bool active) const
+{
+    nl_msg* msg = nlmsg_alloc();
+    if (!msg)
+        return false;
+
+    genlmsg_put(msg, NL_AUTO_PORT, NL_AUTO_SEQ, m_nl.family, 0, 0, NL80211_CMD_SET_INTERFACE, 0);
+    nla_put_u32(msg, NL80211_ATTR_IFINDEX, ifindex);
+    nla_put_u32(msg, NL80211_ATTR_IFTYPE, NL80211_IFTYPE_MONITOR);
+
+    nlattr* flags = nla_nest_start(msg, NL80211_ATTR_MNTR_FLAGS);
+    if (active)
+        nla_put_flag(msg, NL80211_MNTR_FLAG_ACTIVE);
+    nla_put_flag(msg, NL80211_MNTR_FLAG_CONTROL);
+    nla_put_flag(msg, NL80211_MNTR_FLAG_OTHER_BSS);
+    nla_nest_end(msg, flags);
+
+    return sendAndWait(msg);
+}
+
+static int wiphyFeaturesHandler(nl_msg* msg, void* arg)
+{
+    nlattr* tb[NL80211_ATTR_MAX + 1];
+    auto* gnlh = static_cast<genlmsghdr*>(nlmsg_data(nlmsg_hdr(msg)));
+
+    nla_parse(tb, NL80211_ATTR_MAX, genlmsg_attrdata(gnlh, 0), genlmsg_attrlen(gnlh, 0), nullptr);
+    if (tb[NL80211_ATTR_FEATURE_FLAGS])
+        *static_cast<uint32_t*>(arg) |= nla_get_u32(tb[NL80211_ATTR_FEATURE_FLAGS]);
+
+    return NL_OK;
+}
+
+static int ackHandler(nl_msg*, void* arg)
+{
+    *static_cast<bool*>(arg) = true;
+    return NL_STOP;
+}
+
+static int errorHandler(sockaddr_nl*, nlmsgerr*, void* arg)
+{
+    *static_cast<bool*>(arg) = true;
+    return NL_STOP;
+}
+
+// Does the driver advertise NL80211_FEATURE_ACTIVE_MONITOR?
+bool InterfaceHandler::phySupportsActiveMonitor() const
+{
+    nl_msg* msg = nlmsg_alloc();
+    nl_cb* cb = nl_cb_alloc(NL_CB_DEFAULT);
+    if (!msg || !cb)
+    {
+        nlmsg_free(msg);
+        nl_cb_put(cb);
+        return false;
+    }
+
+    genlmsg_put(msg, NL_AUTO_PORT, NL_AUTO_SEQ, m_nl.family, 0, 0, NL80211_CMD_GET_WIPHY, 0);
+    nla_put_u32(msg, NL80211_ATTR_WIPHY, m_wiphy);
+
+    uint32_t features = 0;
+    bool done = false;
+    nl_cb_set(cb, NL_CB_VALID, NL_CB_CUSTOM, wiphyFeaturesHandler, &features);
+    nl_cb_set(cb, NL_CB_ACK, NL_CB_CUSTOM, ackHandler, &done);
+    nl_cb_err(cb, NL_CB_CUSTOM, errorHandler, &done);
+
+    if (nl_send_auto(m_nl.genericSock, msg) >= 0)
+        while (!done && nl_recvmsgs(m_nl.genericSock, cb) >= 0) {}
+
+    nlmsg_free(msg);
+    nl_cb_put(cb);
+
+    return features & NL80211_FEATURE_ACTIVE_MONITOR;
 }
 
 bool InterfaceHandler::newMonitorInterface(const bool active) const
