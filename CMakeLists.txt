@@ -90,3 +90,37 @@ add_executable(Loader
 target_link_libraries(Loader PRIVATE
         MonitorModeBridge
 )
+
+# ---------------------------------------------------------------------------
+# Tests (off by default): checks the C++ Wifi classes against libwifi,
+# built here from its sources in Libs/libwifi.
+#   cmake -B build -DMMB_BUILD_TESTS=ON && cmake --build build
+#   ./build/WifiTests WifiConnectionSniff.pcapng
+# ---------------------------------------------------------------------------
+option(MMB_BUILD_TESTS "Build the libwifi comparison tests" OFF)
+
+if(MMB_BUILD_TESTS)
+    file(GLOB_RECURSE LIBWIFI_SOURCES CONFIGURE_DEPENDS
+            "${CMAKE_SOURCE_DIR}/Libs/libwifi/*.c"
+    )
+    add_library(libwifi_reference STATIC ${LIBWIFI_SOURCES})
+    target_include_directories(libwifi_reference PUBLIC ${CMAKE_SOURCE_DIR}/Libs)
+    target_compile_options(libwifi_reference PRIVATE -w)
+
+    add_executable(WifiTests
+            ${CMAKE_SOURCE_DIR}/Tests/WifiTests.cpp
+            ${CMAKE_SOURCE_DIR}/Bridge/Wifi/Common.cpp
+            ${CMAKE_SOURCE_DIR}/Bridge/Wifi/Tags.cpp
+            ${CMAKE_SOURCE_DIR}/Bridge/Wifi/Radiotap.cpp
+            ${CMAKE_SOURCE_DIR}/Bridge/Wifi/Frame.cpp
+            ${CMAKE_SOURCE_DIR}/Bridge/Wifi/Wpa.cpp
+            ${CMAKE_SOURCE_DIR}/Bridge/Wifi/Bss.cpp
+            ${CMAKE_SOURCE_DIR}/Bridge/Wifi/Beacon.cpp
+            ${CMAKE_SOURCE_DIR}/Bridge/Wifi/Probe.cpp
+            ${CMAKE_SOURCE_DIR}/Bridge/Wifi/Auth.cpp
+            ${CMAKE_SOURCE_DIR}/Bridge/Wifi/Assoc.cpp
+            ${CMAKE_SOURCE_DIR}/Bridge/Constants/WifiDefenitions.cpp
+    )
+    target_include_directories(WifiTests PRIVATE ${CMAKE_SOURCE_DIR}/Bridge)
+    target_link_libraries(WifiTests PRIVATE libwifi_reference PkgConfig::LIBPCAP)
+endif()
