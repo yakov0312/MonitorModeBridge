@@ -32,3 +32,5 @@ cmake-build-*/
 
 # Driver build output
 Driver/mt7927/build/
+__pycache__/
+Driver/mt7927/report-*.txt

@@ -69,7 +69,7 @@ cmd_info() {
 	echo "### firmware"
 	dmesg 2>/dev/null | grep -iE 'mt79|mt7925|mt6639' | grep -iE 'firmware|version|build' | tail -5
 	echo "### phy $PHY"
-	if iw phy "$PHY" info | grep -qi "active monitor"; then
+	if iw phy "$PHY" info | grep -i "active monitor" >/dev/null; then
 		echo "active monitor: ADVERTISED"
 	else
 		echo "active monitor: not advertised"

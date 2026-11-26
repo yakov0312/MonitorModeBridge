@@ -4,6 +4,7 @@
 #   sudo ./build-install.sh            build, sign (if Secure Boot), install, reload
 #   sudo ./build-install.sh --build    build only (into ./build)
 #   sudo ./build-install.sh --uninstall
+#   sudo ./build-install.sh --reload   unload whatever mt76 is loaded, load the installed one
 #
 # Env overrides:
 #   KVER=<uname -r of target kernel>   default: running kernel
@@ -108,7 +109,7 @@ build() {
 
 secure_boot_on() {
 	command -v mokutil >/dev/null &&
-		mokutil --sb-state 2>/dev/null | grep -q "SecureBoot enabled"
+		mokutil --sb-state 2>/dev/null | grep "SecureBoot enabled" >/dev/null
 }
 
 sign_modules() {
@@ -135,10 +136,13 @@ sign_modules() {
 unload() {
 	local m
 	for m in "${MODULES_UNLOAD[@]}"; do
-		if lsmod | grep -q "^${m} "; then
+		if [[ -d /sys/module/$m ]]; then
 			modprobe -r "$m" || warn "could not unload $m"
 		fi
 	done
+	if [[ -d /sys/module/mt76 ]]; then
+		die "mt76 is still loaded (in use?). Check: lsmod | grep mt7"
+	fi
 }
 
 install_modules() {
@@ -175,7 +179,7 @@ verify() {
 		warn "patched mt792x_lib not loaded (no allow_active_monitor param)"
 	fi
 	if command -v iw >/dev/null; then
-		if iw list 2>/dev/null | grep -qi "active monitor"; then
+		if iw list 2>/dev/null | grep -i "active monitor" >/dev/null; then
 			log "OK: driver now advertises active monitor"
 		else
 			warn "active monitor still not advertised; run test-active-monitor.sh info"
@@ -195,6 +199,8 @@ uninstall() {
 }
 
 case "${1:-}" in
+--reload)
+	need_root; unload; modprobe mt7925e; sleep 2; verify ;;
 --uninstall)
 	need_root; uninstall ;;
 --build)
