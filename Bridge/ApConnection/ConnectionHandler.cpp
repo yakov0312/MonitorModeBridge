@@ -39,7 +39,6 @@ void ConnectionHandler::connect(const BasicNetworkInfo& network)
 	m_ssid = network.networkName;
 	m_password = network.networkPassword;
 
-	this->m_interfaceHandler.setFilters();
 	m_packetHandler.toggleSniffing();
 
 	try
@@ -95,7 +94,12 @@ void ConnectionHandler::getNetworkInfo()
 	// Iterate over all the channels and probe for the network
 	for (channel = 1; channel <= CHANNELS; channel++)
 	{
-		m_packetHandler.setChannel(channel);
+		if (!m_interfaceHandler.setInterfaceChannel(channel))
+		{
+			std::cerr << "Cannot set interface channel " << channel << std::endl;
+			continue;
+		}
+
 		for (int i = 0; i < PROBE_COUNT; i++)
 		{
 			m_packetHandler.sendPacket(probeReq);
@@ -318,7 +322,7 @@ void ConnectionHandler::associateNetwork()
 {
 	libwifi_assoc_req association = {};
 	libwifi_create_assoc_req(&association, this->m_bssid, m_deviceMac,
-		this->m_bssid, this->m_ssid.c_str(), PacketHandler::getChannel());
+		this->m_bssid, this->m_ssid.c_str(), InterfaceHandler::getInterfaceChannel());
 
 	// Only legacy rates, on purpose: without HT/VHT capabilities the AP
 	// treats us as an 802.11a/g station and never sends A-MPDUs. Those would

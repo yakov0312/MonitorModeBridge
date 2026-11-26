@@ -19,7 +19,8 @@ class PacketHandler
 
 public:
 	PacketHandler();
-	PacketHandler(uint8_t channel, const uint8_t* apMac);
+
+	explicit PacketHandler(const uint8_t* apMac);
 	~PacketHandler();
 
 	// Receive related
@@ -44,10 +45,6 @@ public:
 	// AP related
 	void changeMacAp(const uint8_t* apMAc);
 
-	// Channel related
-	void setChannel(uint8_t channel) const;
-	static uint8_t getChannel();
-
 	// Frames addressed to us, and how many of them were retransmissions
 	struct RxStats
 	{
@@ -58,10 +55,6 @@ public:
 
 private:
 	void parsePackets(const u_char* packet, size_t size);
-
-	// Channel related
-	void setChannel() const;
-	static uint8_t m_channel;
 
 	std::atomic<bool> m_isSniffing;
 	std::thread m_sniffer;
@@ -79,6 +72,6 @@ private:
 	std::atomic<uint64_t> m_rxRetries{0};
 
 	std::vector<uint8_t> m_apAck;
-	uint8_t m_apMac[MAC_SIZE_BYTES];
+	uint8_t m_apMac[MAC_SIZE_BYTES]{};
 
 };
