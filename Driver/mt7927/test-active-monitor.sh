@@ -9,7 +9,7 @@
 # Single steps:
 #   setup <freq> [active|passive]   create mon0 on <freq> MHz (e.g. 2437, 5180)
 #   rx [seconds]                    check RX keeps flowing on mon0 (default 120)
-#   ack <bssid>                     does the card ACK frames to mon0's MAC?
+#   ack <bssid> [src]               does the card ACK frames to mon0's MAC (or <src>)?
 #   teardown                        delete mon0, give the card back to NetworkManager
 #
 # `all` writes report-<date>.txt next to this script.  Send that file back.
@@ -19,6 +19,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MON=mon0
 # Locally administered MAC for the monitor vif; the ACK test targets it.
 MON_MAC="${MON_MAC:-02:4d:4d:42:00:01}"
+# MAC owned by no interface: nothing should ACK it (test control).
+CONTROL_MAC="${CONTROL_MAC:-02:4d:4d:42:00:99}"
 SNIFFER_PARAM=/sys/module/mt7925_common/parameters/monitor_sniffer
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
@@ -140,8 +142,8 @@ cmd_rx() {
 }
 
 cmd_ack() {
-	local bssid="${1:?bssid of your AP}"
-	python3 "$HERE/ack_test.py" "$MON" "$bssid" --src "$MON_MAC"
+	local bssid="${1:?bssid of your AP}" src="${2:-$MON_MAC}"
+	python3 "$HERE/ack_test.py" "$MON" "$bssid" --src "$src"
 }
 
 set_sniffer() {
@@ -159,7 +161,10 @@ run_case() {
 	set_sniffer "$sniffer"
 	if cmd_setup "$freq" "$mode"; then
 		cmd_rx 60
+		echo "--- ACK to mon0's own MAC ($MON_MAC)"
 		cmd_ack "$bssid"
+		echo "--- CONTROL: ACK to unowned MAC ($CONTROL_MAC), expect NOT ACKED"
+		cmd_ack "$bssid" "$CONTROL_MAC"
 	else
 		echo "SETUP FAILED"
 	fi
