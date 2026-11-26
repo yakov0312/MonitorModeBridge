@@ -6,7 +6,6 @@
 #include <vector>
 
 #include "../Constants/WifiDefenitions.h"
-#include "../Interface/InterfaceHandler.h"
 
 #include <pcap/pcap.h>
 
@@ -28,9 +27,10 @@ struct AKM
 	std::vector<uint8_t> pmk;
 
 	std::vector<uint8_t> ptk;
-	uint8_t kckSize;
-	uint8_t kekSize;
+	uint8_t kckSize = 0;
+	uint8_t kekSize = 0;
 	uint8_t tkSize = TK_SIZE;
+	uint8_t micSize = 0; // EAPOL-Key MIC length, set by the AKM (not the cipher)
 
 	const EVP_MD* evpDigest;
 
@@ -54,8 +54,10 @@ public:
 
 	void setSuit(uint64_t akmSuit, uint64_t cipherSuit);
 	void setPmk(const std::string& password, const std::string& ssid);
-	void setPtk(const uint8_t* nonce1, const uint8_t* nonce2, const uint8_t* mac1);
-	void setMic(EapolFrame& eapol) const;
+	// aa = AP MAC, spa = our MAC
+	void setPtk(const uint8_t* nonce1, const uint8_t* nonce2, const uint8_t* aa, const uint8_t* spa);
+	// MIC over the EAPOL frame: eapolLength bytes starting at the EAPOL header
+	void setMic(EapolFrame& eapol, size_t eapolLength) const;
 	void decryptGtk(const uint8_t* encryptedGtk);
 
 	static void printPacketDebug(const u_char* packet, uint32_t length);

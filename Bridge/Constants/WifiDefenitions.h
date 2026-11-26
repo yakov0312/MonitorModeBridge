@@ -70,9 +70,13 @@ constexpr uint8_t EAPOL_VERSION = 2;
 constexpr uint8_t EAPOL_KEY_INFO = 3;
 constexpr uint8_t WPA2_Key_Descriptor = 2;
 constexpr uint8_t s = (1 << 6) ;
-constexpr uint16_t INFORMATION_FLAG_M2 = 0x0108 | 2;
-constexpr uint16_t INFORMATION_FLAG_M4 = 0x0300;
-constexpr uint16_t EAPOL_FRAME_CONTROL = 0x0008;
+// Key Information (host order, sent big-endian):
+// bits 0-2 descriptor version (2 = HMAC-SHA1 MIC + AES key wrap, AKM 2),
+// bit 3 pairwise, bit 8 MIC, bit 9 secure
+constexpr uint16_t INFORMATION_FLAG_M2 = 0x0100 | 0x0008 | 2; // MIC | pairwise | v2
+constexpr uint16_t INFORMATION_FLAG_M4 = 0x0300 | 0x0008 | 2; // secure | MIC | pairwise | v2
+// Data frame with ToDS set (STA -> AP), little-endian on the air: 08 01
+constexpr uint16_t EAPOL_FRAME_CONTROL = 0x0108;
 constexpr uint16_t EAPOL_SEC_CTRL = 0x0010;
 
 // WPA size
@@ -108,7 +112,7 @@ struct IeeeHeader
 	uint8_t  addr1[MAC_SIZE_BYTES];        // DA = AP MAC
 	uint8_t  addr2[MAC_SIZE_BYTES];        // SA = STA MAC
 	uint8_t  addr3[MAC_SIZE_BYTES];        // BSSID
-	uint16_t seqControl = EAPOL_SEC_CTRL;
+	uint16_t seqControl = EAPOL_SEC_CTRL; // sequence number << 4, must change per frame
 } __attribute__((packed));
 
 struct LLCHeader

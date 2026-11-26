@@ -218,10 +218,11 @@ void ConnectionHandler::setSecurity(const libwifi_bss* bss)
 		m_securityType = WPA2;
 
 		// Akm suite selection for WPA2
-		if (bss->encryption_info & LIBWIFI_AKM_SUITE_PSK_SHA256)
-			m_akmSuite = AKM_SUITE_PSK_SHA256;
-		else if (bss->encryption_info & LIBWIFI_AKM_SUITE_PSK)
+		// Prefer plain PSK (AKM 2): it is the one CryptoManager implements
+		if (bss->encryption_info & LIBWIFI_AKM_SUITE_PSK)
 			m_akmSuite = AKM_SUITE_PSK;
+		else if (bss->encryption_info & LIBWIFI_AKM_SUITE_PSK_SHA256)
+			m_akmSuite = AKM_SUITE_PSK_SHA256;
 		else
 			throw std::runtime_error("Given akm suites are not supported yet");
 
@@ -420,17 +421,28 @@ void ConnectionHandler::performHandshakeNonSAE()
 	if (getrandom(sNonce, sizeof(sNonce), 0) != sizeof(sNonce))
 		throw std::invalid_argument("Failed to generate SNonce");
 
-	m_cryptoManager.setPtk(wpaData.key_info.nonce, sNonce, m_bssid);
+	m_cryptoManager.setPtk(wpaData.key_info.nonce, sNonce, m_bssid, m_deviceMac);
+
+	// Size of the EAPOL frame the MIC covers: header + key descriptor
+	constexpr size_t EAPOL_FULL_SIZE = sizeof(EAPOLHeader) + sizeof(WPA2KeyDesc);
+	// Key data (RSN IE: tag + length + body) only goes in M2
+	constexpr size_t KEY_DATA_SIZE = 2 + RSN_INFO_SIZE;
+
+	// Each frame needs its own sequence number or the AP drops it as a duplicate
+	static uint16_t eapolSeq = 0x100;
 
 	// Construct the m2
 	EapolFrame eapol { .keyDesc = { .replayCounter = htobe64(wpaData.key_info.replay_counter) }};
 
+	eapol.eapolHeader.version = wpaData.version; // answer with the AP's EAPOL version
+	eapol.frameHeader.seqControl = static_cast<uint16_t>(eapolSeq++ << 4);
 	eapol.keyDesc.keyInfo = htons(INFORMATION_FLAG_M2);
 
 	memcpy(eapol.keyDesc.nonce, sNonce, NONCE_SIZE);
+	// Must be byte-identical to the RSN IE of the association request
 	memcpy(eapol.keyDesc.keyData, m_rsnTag, RSN_INFO_SIZE);
 
-	m_cryptoManager.setMic(eapol);
+	m_cryptoManager.setMic(eapol, EAPOL_FULL_SIZE);
 
 	memcpy(eapol.frameHeader.addr1, m_bssid, MAC_SIZE_BYTES);
 	memcpy(eapol.frameHeader.addr2, m_deviceMac, MAC_SIZE_BYTES);
@@ -452,12 +464,18 @@ void ConnectionHandler::performHandshakeNonSAE()
 
 	m_cryptoManager.decryptGtk(wpaData.key_info.key_data);
 
+	// M4: same replay counter as M3, no nonce, no key data
+	eapol.frameHeader.seqControl = static_cast<uint16_t>(eapolSeq++ << 4);
 	eapol.keyDesc.keyInfo = htons(INFORMATION_FLAG_M4);
-	eapol.keyDesc.replayCounter = wpaData.key_info.replay_counter;
+	eapol.keyDesc.replayCounter = htobe64(wpaData.key_info.replay_counter);
+	memset(eapol.keyDesc.nonce, 0, NONCE_SIZE);
+	eapol.keyDesc.keyDataLength = 0;
+	eapol.eapolHeader.length = htons(sizeof(WPA2KeyDesc) - KEY_DATA_SIZE);
 
-	m_cryptoManager.setMic(eapol);
+	m_cryptoManager.setMic(eapol, EAPOL_FULL_SIZE - KEY_DATA_SIZE);
 
-	std::vector m4(reinterpret_cast<uint8_t*>(&eapol), reinterpret_cast<uint8_t*>(&eapol) + sizeof(EapolFrame));
+	std::vector m4(reinterpret_cast<uint8_t*>(&eapol),
+		reinterpret_cast<uint8_t*>(&eapol) + sizeof(EapolFrame) - KEY_DATA_SIZE);
 
 	m_packetHandler.sendPacket(m4);
 

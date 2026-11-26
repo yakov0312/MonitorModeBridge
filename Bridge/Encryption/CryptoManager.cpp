@@ -2,7 +2,6 @@
 
 #include "CryptoManager.h"
 #include "../Constants/WifiDefenitions.h"
-#include "../Interface/InterfaceHandler.h"
 
 #include <chrono>
 #include <cstring>
@@ -18,27 +17,21 @@ extern "C" {
   #include <libwifi/core/misc/security.h>
 }
 
-//SHA256
-constexpr uint16_t AKM_SHA256_PTK_SIZE = 48;
-constexpr uint16_t AKM_SHA256_KCK_SIZE = 16;
-constexpr uint16_t AKM_SHA256_KEK_SIZE = 16;
+// WPA2-PSK (AKM 2), IEEE 802.11-2020 12.7.1.2 / 12.7.2
+constexpr uint16_t AKM_PSK_PMK_SIZE = 32;
+constexpr uint16_t AKM_PSK_KCK_SIZE = 16;
+constexpr uint16_t AKM_PSK_KEK_SIZE = 16;
+constexpr uint16_t AKM_PSK_MIC_SIZE = 16; // HMAC-SHA1-128
 
-constexpr uint16_t AKM_SHA256_PMK_SIZE = 32;
-
-//SHA 384
-constexpr uint16_t AKM_SHA384_PTK_SIZE = 48;
-constexpr uint16_t AKM_SHA384_KCK_SIZE = 24;
-constexpr uint16_t AKM_SHA384_KEK_SIZE = 32;
-
-constexpr uint16_t AKM_SHA384_PMK_SIZE = 72;
+// Temporal key sizes
+constexpr uint16_t TK128_SIZE = 16; // CCMP-128 / GCMP-128
+constexpr uint16_t TK256_SIZE = 32; // CCMP-256 / GCMP-256
 
 //CMP-128
 constexpr uint16_t CMP128_GTK_SIZE = 16;
-constexpr uint16_t CMP128_MIC_SIZE = 8;
 
 //CMP-256
 constexpr uint16_t CMP256_GTK_SIZE = 32;
-constexpr uint16_t CMP256_MIC_SIZE = 8;
 
 //PTK
 constexpr uint8_t PTK_DATA_SIZE = 76;
@@ -51,35 +44,35 @@ CryptoManager::CryptoManager() : m_akm(), m_cipher()
 
 void CryptoManager::setSuit(const uint64_t akmSuit, const uint64_t cipherSuit)
 {
-	if (akmSuit == AKM_SUITE_PSK || akmSuit == AKM_SUITE_PSK_SHA256)
-	{
-		m_akm.pmk.resize(AKM_SHA256_PMK_SIZE);
-		m_akm.ptk.resize(AKM_SHA256_PTK_SIZE);
-		m_akm.evpDigest = (akmSuit == AKM_SUITE_PSK_SHA256) ? EVP_sha256() : EVP_sha1();
-	}
-	else if (akmSuit == AKM_PSK_SHA384)
-	{
-		m_akm.pmk.resize(AKM_SHA384_PMK_SIZE);
-		m_akm.ptk.resize(AKM_SHA384_PTK_SIZE);
-		m_akm.evpDigest = EVP_sha384();
-	}
-	else
-		throw std::invalid_argument("Suit not supported"); // SAE & OWE
+	// Only AKM 2 (PSK with HMAC-SHA1) is implemented. AKM 6 (PSK-SHA256) needs
+	// the SHA256 KDF and an AES-CMAC MIC, AKM 20 (PSK-SHA384) HMAC-SHA384-192:
+	// refuse them instead of producing keys the AP will reject.
+	if (akmSuit != AKM_SUITE_PSK)
+		throw std::invalid_argument("AKM " + std::to_string(akmSuit) + " is not supported yet (only WPA2-PSK, AKM 2)");
+
+	m_akm.pmk.resize(AKM_PSK_PMK_SIZE);
+	m_akm.kckSize = AKM_PSK_KCK_SIZE;
+	m_akm.kekSize = AKM_PSK_KEK_SIZE;
+	m_akm.micSize = AKM_PSK_MIC_SIZE;
+	m_akm.evpDigest = EVP_sha1();
 
 	if (cipherSuit == CIPHER_SUITE_GCMP128 || cipherSuit == CIPHER_SUITE_CCMP128)
 	{
-		m_cipher.micSize = CMP128_MIC_SIZE;
+		m_akm.tkSize = TK128_SIZE;
 		m_cipher.gtk.resize(CMP128_GTK_SIZE);
 		m_cipher.evpCipher = (cipherSuit == CIPHER_SUITE_GCMP128) ? EVP_aes_128_gcm() : EVP_aes_128_ccm();
 	}
 	else if (cipherSuit == CIPHER_SUITE_GCMP256 || cipherSuit == CIPHER_SUITE_CCMP256)
 	{
-		m_cipher.micSize = CMP256_MIC_SIZE;
+		m_akm.tkSize = TK256_SIZE;
 		m_cipher.gtk.resize(CMP256_GTK_SIZE);
 		m_cipher.evpCipher = (cipherSuit == CIPHER_SUITE_GCMP256) ? EVP_aes_256_gcm() : EVP_aes_256_ccm();
 	}
 	else
 		throw std::invalid_argument("Suit not supported");
+
+	// PTK = KCK || KEK || TK
+	m_akm.ptk.resize(m_akm.kckSize + m_akm.kekSize + m_akm.tkSize);
 
 	m_cipher.suit = cipherSuit;
 	m_akm.suit = akmSuit;
@@ -90,13 +83,17 @@ void CryptoManager::setPmk(const std::string& password, const std::string& ssid)
 	if (m_akm.suit == 0)
 		throw std::invalid_argument("Invalid suite");
 
-	PKCS5_PBKDF2_HMAC(password.data(), password.size(), reinterpret_cast<const u_char*>(ssid.c_str()),
-		   ssid.size(), PMK_ITERATIONS, m_akm.evpDigest, m_akm.pmk.size(), m_akm.pmk.data());
+	// Passphrase -> PSK is always PBKDF2-HMAC-SHA1, 4096 rounds, 256 bits
+	// (802.11-2020 J.4), whatever hash the AKM uses later.
+	if (!PKCS5_PBKDF2_HMAC(password.data(), static_cast<int>(password.size()),
+			reinterpret_cast<const u_char*>(ssid.c_str()), static_cast<int>(ssid.size()),
+			PMK_ITERATIONS, EVP_sha1(), static_cast<int>(m_akm.pmk.size()), m_akm.pmk.data()))
+		throw std::runtime_error("PBKDF2 failed");
 }
 
-void CryptoManager::setPtk(const uint8_t* nonce1, const uint8_t* nonce2, const uint8_t* mac1)
+void CryptoManager::setPtk(const uint8_t* nonce1, const uint8_t* nonce2, const uint8_t* aa, const uint8_t* spa)
 {
-	if (!nonce1 || !nonce2 || !mac1)
+	if (!nonce1 || !nonce2 || !aa || !spa)
         throw std::invalid_argument("Invalid pointers");
 
 	if (m_akm.suit == 0)
@@ -105,9 +102,8 @@ void CryptoManager::setPtk(const uint8_t* nonce1, const uint8_t* nonce2, const u
 	const uint8_t* pmk = m_akm.pmk.data();
 	uint8_t* ptk = m_akm.ptk.data();
 
-    // Get both MAC addresses
-    // Looked up here, not in a static: a static would set up the card before main()
-    const uint8_t* mac2 = InterfaceHandler::getInstance().getInterfaceMac();
+    const uint8_t* mac1 = aa;
+    const uint8_t* mac2 = spa;
 
     // Ensure deterministic ordering (both sides must match exactly)
     if (memcmp(mac1, mac2, MAC_SIZE_BYTES) > 0)
@@ -141,8 +137,9 @@ void CryptoManager::setPtk(const uint8_t* nonce1, const uint8_t* nonce2, const u
 
     const size_t seedSize = labelSize + 1 + PTK_DATA_SIZE;
 
-    // Expand key material using iterative HMAC
-    uint8_t counter = 1;
+    // PRF-n (802.11-2020 12.7.1.2): HMAC-SHA1(PMK, label || 0x00 || data || i)
+    // with i counting from 0
+    uint8_t counter = 0;
     size_t offset = 0;
 
     while (offset < m_akm.ptk.size())
@@ -168,25 +165,26 @@ void CryptoManager::setPtk(const uint8_t* nonce1, const uint8_t* nonce2, const u
     }
 }
 
-void CryptoManager::setMic(EapolFrame& eapol) const
+void CryptoManager::setMic(EapolFrame& eapol, const size_t eapolLength) const
 {
 	if (m_akm.suit == 0)
 		throw std::invalid_argument("Invalid suite");
 
-	memset(eapol.keyDesc.mic, 0, m_cipher.micSize);
+	// The MIC is computed with the MIC field set to zero
+	memset(eapol.keyDesc.mic, 0, sizeof(eapol.keyDesc.mic));
 
-	// KCK is first 16 bytes of PTK
+	// KCK is the first kckSize bytes of the PTK
 	const uint8_t* kck = m_akm.ptk.data();
 	unsigned int micLen = 0;
 	uint8_t micOutput[EVP_MAX_MD_SIZE];
 
+	// HMAC over the EAPOL frame: header + key descriptor (incl. key data)
 	const auto* startOffset = reinterpret_cast<uint8_t*>(&eapol.eapolHeader);
-
-	// Calculate HMAC over the whole m2WpaData struct
-	if (!HMAC(m_akm.evpDigest, kck, m_akm.kckSize, startOffset, sizeof(EAPOLHeader) + sizeof(WPA2KeyDesc), micOutput, &micLen))
+	if (!HMAC(m_akm.evpDigest, kck, m_akm.kckSize, startOffset, eapolLength, micOutput, &micLen))
 		throw std::runtime_error("HMAC calculation failed");
 
-	memcpy(eapol.keyDesc.mic, micOutput, m_cipher.micSize);
+	// HMAC-SHA1 gives 20 bytes; the MIC field takes the first 16
+	memcpy(eapol.keyDesc.mic, micOutput, m_akm.micSize);
 }
 
 void CryptoManager::decryptGtk(const uint8_t* encryptedGtk)
